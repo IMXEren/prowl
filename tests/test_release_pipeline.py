@@ -120,6 +120,14 @@ def test_release_workflow_has_full_gates_without_registry_publication() -> None:
     assert "windows_fonts=.private-fonts" in workflow
 
 
+def test_dev_push_opens_a_draft_pull_request_to_main() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "open_pull_request.yml").read_text(encoding="utf-8")
+    assert "branches:\n      - dev" in workflow
+    assert "destination_branch: main" in workflow
+    assert "pr_draft: true" in workflow
+    assert "pull-requests: write" in workflow
+
+
 def test_set_version_rewrites_single_source(tmp_path: Path) -> None:
     about = tmp_path / "__about__.py"
     about.write_text('"""Version."""\n\n__version__ = "0.0.0"\n', encoding="utf-8")
