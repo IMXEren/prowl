@@ -27,6 +27,7 @@ from turbohtml import parse as tb_parse
 from prowl.browser.browser import Browser, TabGroup
 from prowl.browser.cookies import Cookie, Cookies
 from prowl.browser.exceptions import JSONExtractError, PageLoadError
+from prowl.browser.headers import HEADER_SCOPE_DOCUMENT, HEADER_SCOPES, normalize_custom_headers
 from prowl.browser.utils import run_coroutine_sync
 from prowl.shutdown import get_process_cancel_token
 
@@ -117,7 +118,8 @@ class Site:
         self.cf_auto_solve_enabled: bool = False
         self.user_agent: str | None = None
         self._on_request_callback_id: int | None = None
-        self._headers_page: Any = None
+        self._header_route_matcher: Any = None
+        self._header_route_handler: Any = None
         self._loaded.clear()
         self.cleanup_done: bool = False
 
@@ -134,13 +136,17 @@ class Site:
         self: Self,
         url: str,
         timeout: int,  # noqa: ASYNC109
+        *,
         headers: dict[str, str] | None = None,
+        header_scope: str | None = None,
     ) -> Source:
-        """Loads the url.
+        """Load *url*, optionally adding validated headers within a narrow scope.
 
-        Waits for the page to load until timeout is hit. Caller-provided
-        *headers* are applied to the page's requests and cleared on every path.
-        Raises `PageLoadError` on load failure.
+        With no caller headers, the browser owns every request header. A
+        ``document`` scope modifies only the initial main-frame navigation. An
+        ``origin`` scope modifies requests whose scheme, host, and effective
+        port exactly match *url*. Redirects and third-party subresources never
+        inherit scoped headers. Raises :class:`PageLoadError` on failure.
         """
         self._reset()
         self.url = url
@@ -149,7 +155,8 @@ class Site:
         try:
             self.start = time.perf_counter()
             self.tab = await self._tg.ptab
-            await self._apply_extra_headers(headers or {})
+            if headers:
+                await self._install_scoped_headers(headers, header_scope)
             await self._add_network_listeners()
             await self.tab.enable_page_events()
             await self.tab.go_to(self.url, timeout=round(self.get_time_left()))
@@ -254,21 +261,6 @@ class Site:
         """Mark the POST fetch cleaned up; page listeners belong to the warm GET."""
         self.cleanup_done = True
 
-    async def _apply_extra_headers(self, headers: dict[str, str]) -> None:
-        """Apply validated caller headers to the page for the next requests."""
-        if not headers:
-            return
-        page = self._tg.ppage
-        await page.set_extra_http_headers(headers)
-        self._headers_page = page
-
-    async def _clear_extra_headers(self) -> None:
-        """Remove caller headers so they never leak into later unrelated work."""
-        page, self._headers_page = self._headers_page, None
-        if page is not None:
-            with contextlib.suppress(Exception):
-                await page.set_extra_http_headers({})
-
     async def _warm_origin_root(self, url: str) -> None:
         """Warm *url*'s origin root through the normal GET solver path.
 
@@ -286,12 +278,65 @@ class Site:
     async def _cleanup(self) -> None:
         if self.cleanup_done:
             return
-        await self._clear_extra_headers()
-        if self.cf_auto_solve_enabled:
-            await self.tab.disable_auto_solve_cloudflare_captcha()
-        await self.tab.disable_page_events()
-        await self._remove_network_listeners()
-        self.cleanup_done = True
+        try:
+            if self.cf_auto_solve_enabled:
+                await self.tab.disable_auto_solve_cloudflare_captcha()
+        finally:
+            try:
+                await self.tab.disable_page_events()
+            finally:
+                try:
+                    await self._remove_network_listeners()
+                finally:
+                    await self._remove_scoped_headers()
+                    self.cleanup_done = True
+
+    async def _install_scoped_headers(self, headers: dict[str, str], header_scope: str | None) -> None:
+        """Install a temporary route that cannot leak headers across origins."""
+        if header_scope not in HEADER_SCOPES:
+            msg = f"unsupported header scope: {header_scope!r}"
+            raise PageLoadError(msg)
+        try:
+            headers = normalize_custom_headers(headers)
+        except ValueError as error:
+            raise PageLoadError(str(error)) from error
+
+        page = self._tg.ppage
+        target_url = self.url
+
+        def matcher(candidate: str) -> bool:
+            if header_scope == HEADER_SCOPE_DOCUMENT:
+                return _are_urls_equal(candidate, target_url)
+            return _same_origin(candidate, target_url)
+
+        document_header_sent = False
+
+        async def apply_headers(route: Any) -> None:
+            nonlocal document_header_sent
+            request = route.request
+            if header_scope == HEADER_SCOPE_DOCUMENT:
+                if document_header_sent or not (request.is_navigation_request() and request.frame == page.main_frame):
+                    await route.continue_()
+                    return
+                document_header_sent = True
+
+            merged = await request.all_headers()
+            merged.update(headers)
+            await route.continue_(headers=merged)
+
+        await page.route(matcher, apply_headers)
+        self._header_route_matcher = matcher
+        self._header_route_handler = apply_headers
+
+    async def _remove_scoped_headers(self) -> None:
+        """Remove the temporary header route before the page can be reused."""
+        if self._header_route_handler is None:
+            return
+        matcher = self._header_route_matcher
+        handler = self._header_route_handler
+        await self._tg.ppage.unroute(matcher, handler)
+        self._header_route_matcher = None
+        self._header_route_handler = None
 
     async def _wait_page_load(self: Self) -> None:
         """Wait for document.readyState to be options.page_load_state."""
@@ -652,6 +697,23 @@ def _origin_root(url: str) -> str | None:
     return f"{parts.scheme}://{parts.netloc}/"
 
 
+def _same_origin(current_url: str, target_url: str) -> bool:
+    """Return whether two URLs have the same scheme, host, and effective port."""
+    try:
+        current = urlsplit(current_url)
+        target = urlsplit(target_url)
+        current_port = current.port or (443 if current.scheme.lower() == "https" else 80)
+        target_port = target.port or (443 if target.scheme.lower() == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        current.scheme.lower() == target.scheme.lower()
+        and current.hostname is not None
+        and current.hostname.lower() == (target.hostname or "").lower()
+        and current_port == target_port
+    )
+
+
 def _build_post_fetch_script(url: str, post_data: str, headers: dict[str, str]) -> str:
     """Return a page-context script that performs a POST and reports the response.
 
@@ -750,17 +812,33 @@ def resolve_site(tab_group: TabGroup, url: str) -> Site:
     return Site(tab_group)
 
 
-async def fetch(tab_group: TabGroup, url: str, timeout: int = 60) -> Source:  # noqa: ASYNC109
+async def fetch(
+    tab_group: TabGroup,
+    url: str,
+    timeout: int = 60,  # noqa: ASYNC109
+    *,
+    headers: dict[str, str] | None = None,
+    header_scope: str | None = None,
+) -> Source:
     """Load *url* in *tab_group* and return its :class:`Source`.
 
-    Waits for the page to load until *timeout* is hit.
+    Waits for the page to load until *timeout* is hit. Optional headers are
+    limited by ``header_scope`` to the initial document or exact target origin.
     Raises :class:`PageLoadError` on load failure.
     """
     site = resolve_site(tab_group, url)
+    if headers:
+        return await site.get(url, timeout, headers=headers, header_scope=header_scope)
     return await site.get(url, timeout)
 
 
-async def source(url: str, timeout: int = 60) -> Source:  # noqa: ASYNC109
+async def source(
+    url: str,
+    timeout: int = 60,  # noqa: ASYNC109
+    *,
+    headers: dict[str, str] | None = None,
+    header_scope: str | None = None,
+) -> Source:
     """Wrapper to return html source of the url on successful loading.
 
     Waits for the page to load until timeout is hit.
@@ -774,10 +852,10 @@ async def source(url: str, timeout: int = 60) -> Source:  # noqa: ASYNC109
     try:
         await Browser.start()
         tg = await Browser.create()
-        source = await get_process_cancel_token().race(
-            fetch(tg, url, timeout),
-            poll_interval=1,
+        fetch_task = (
+            fetch(tg, url, timeout, headers=headers, header_scope=header_scope) if headers else fetch(tg, url, timeout)
         )
+        source = await get_process_cancel_token().race(fetch_task, poll_interval=1)
         # Don't load any cookies into browser as it already loads in persistent ctx
         stored_cookies = Cookies()
         stored_cookies.update_cookies(cast("list[Cookie]", await tg.pd().get_cookies()))
@@ -786,13 +864,22 @@ async def source(url: str, timeout: int = 60) -> Source:  # noqa: ASYNC109
         await Browser.finally_cleanup(tg)
 
 
-def load_page_in_browser(url: str, timeout: int) -> Source | None:
+def load_page_in_browser(
+    url: str,
+    timeout: int,
+    *,
+    headers: dict[str, str] | None = None,
+    header_scope: str | None = None,
+) -> Source | None:
     """Load *url* in a browser via :func:`run_coroutine_sync`.
 
     Returns the page source, or ``None`` on failure.
     """
     try:
-        return run_coroutine_sync(source(url, timeout))  # type: ignore[no-any-return]
+        source_task = (
+            source(url, timeout, headers=headers, header_scope=header_scope) if headers else source(url, timeout)
+        )
+        return run_coroutine_sync(source_task)  # type: ignore[no-any-return]
     except Exception as e:  # noqa: BLE001
         logger.exception(f"failed to load url in the browser: {e}")
         return None
