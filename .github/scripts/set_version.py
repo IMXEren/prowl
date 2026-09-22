@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Set Prowl's single-source package version from a semantic-release version.
 
 semantic-release decides ``nextRelease.version``; this rewrites the committed

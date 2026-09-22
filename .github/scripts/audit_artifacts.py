@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Audit built Prowl wheel/sdist artifacts for forbidden payloads and version drift.
 
 A released Prowl artifact must contain source only: never the CloakBrowser

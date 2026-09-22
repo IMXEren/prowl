@@ -73,7 +73,7 @@ ignore = [
 convention = "numpy"
 
 [tool.ruff.lint.per-file-ignores]
-".github/scripts/**" = ["T201"]
+".github/scripts/**" = ["INP001", "T201"]
 "tests/**" = ["D", "S101", "PT009", "PT027", "SLF001", "PLR2004", "ARG005", "C901", "N806", "ASYNC109"]
 "src/prowl/browser/rwlock.py" = ["PGH004"]
 
