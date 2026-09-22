@@ -1,0 +1,14 @@
+{
+  "name": "prowl-release",
+  "private": true,
+  "description": "semantic-release tooling for Prowl",
+  "devDependencies": {
+    "@cleyrop-org/semantic-release-backmerge": "^6.2.0",
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/exec": "^7.1.0",
+    "@semantic-release/git": "^11.0.1",
+    "@semantic-release/github": "^12.0.9",
+    "conventional-changelog-conventionalcommits": "^9.3.1",
+    "semantic-release": "^25.0.9"
+  }
+}
