@@ -27,8 +27,8 @@ src/prowl/
 The core is production browser code. It keeps its tested dual Playwright +
 pydoll/CloakBrowser behaviour, persistent profile warming and packing, cookie handling,
 supported challenge handling, and cancellation/cleanup semantics. The service layer adds
-environment-driven configuration, caller-supplied request headers, and a real browser
-`POST` path, and the generic signal coordinator moved from `src/signals.py` into
+environment-driven configuration, explicitly scoped custom request headers, and a real
+browser `POST` path, and the generic signal coordinator moved from `src/signals.py` into
 `prowl.shutdown`, keeping the package self-contained.
 
 ## Profiles are persistent trust assets
@@ -84,15 +84,33 @@ authenticated-free hop; put the credential injection at that local hop instead.
 
 | cmd | fields |
 | --- | --- |
-| `request.get` | `url`, `maxTimeout`, `session`, `session_ttl_minutes`, `headers`, `cookies`, `returnOnlyCookies`, `proxy` |
-| `request.post` | as `request.get` plus `postData` (string, or object sent as JSON) |
+| `request.get` | `url`, `maxTimeout`, `session`, `session_ttl_minutes`, `headers`, `headerScope`, `cookies`, `returnOnlyCookies`, `proxy` |
+| `request.post` | as `request.get` except `headerScope`, plus `postData` (string, or object sent as JSON) |
 | `sessions.create` | optional `session` name, optional `session_ttl_minutes` |
 | `sessions.list` | — |
 | `sessions.destroy` | `session` |
 
-Unknown fields are rejected rather than ignored. Caller headers are applied to the page's
-requests and cleared afterwards; browser-controlled headers (`Host`, `Cookie`,
-`Content-Length`, `Proxy-Authorization`, `Connection`, and similar) are rejected.
+Unknown fields are rejected rather than ignored. A GET without custom headers leaves all
+headers under browser control. Custom GET headers require an explicit `headerScope`:
+`document` applies them only to the initial main-frame navigation, while `origin` applies
+them only to requests with the target URL's exact scheme, host, and effective port. Neither
+scope sends headers to redirects on another origin, subdomains, or third-party resources.
+Browser-controlled and fingerprint headers (`Host`, `Cookie`, `User-Agent`, `Accept`,
+`Origin`, `Referer`, `Sec-*`, and similar) are always rejected. `request.post` accepts only
+`Content-Type`, scoped naturally to its single page-context fetch.
+
+For an authenticated initial navigation without exposing the credential to subresources:
+
+```json
+{
+  "cmd": "request.get",
+  "url": "https://example.com/private",
+  "headers": { "Authorization": "Bearer token" },
+  "headerScope": "document"
+}
+```
+
+Use `origin` instead only when every request to that exact origin needs the custom header.
 
 Response envelope:
 
