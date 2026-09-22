@@ -1,3 +1,14 @@
+## 1.0.0 (2026-09-22)
+
+### Bug Fixes
+
+* **ci:** lint release scripts on Linux ([32653a2](https://github.com/IMXEren/prowl/commit/32653a2b065b93c36f271b813ad318d2fb3cf761))
+
+### New Features
+
+* add reusable browser automation service ([377de65](https://github.com/IMXEren/prowl/commit/377de651039346c2fa6b0bb5e8641713d99b731c))
+* **deploy:** add the local container stack ([06645fb](https://github.com/IMXEren/prowl/commit/06645fbf2818ceb40655c7754ccb958b271c1c35))
+
 ## 1.0.0-dev.1 (2026-09-22)
 
 ### Bug Fixes
