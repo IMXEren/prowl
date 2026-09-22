@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+node_modules/
+.private-fonts/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.zip
+browser-profile*/
+browser_cookies.json
+.env
