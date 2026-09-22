@@ -1,0 +1,82 @@
+{
+  "branches": [
+    "main",
+    {
+      "name": "dev",
+      "prerelease": true
+    }
+  ],
+  "plugins": [
+    [
+      "@semantic-release/commit-analyzer",
+      {
+        "releaseRules": [
+          { "type": "fix", "release": "patch" },
+          { "type": "feat", "release": "minor" },
+          { "type": "perf", "release": "patch" },
+          { "type": "refactor", "release": "patch" }
+        ]
+      }
+    ],
+    [
+      "@semantic-release/release-notes-generator",
+      {
+        "preset": "conventionalcommits",
+        "presetConfig": {
+          "types": [
+            { "type": "fix", "section": "Bug Fixes", "hidden": false },
+            { "type": "feat", "section": "New Features", "hidden": false },
+            { "type": "perf", "section": "Performance Improvements", "hidden": false },
+            { "type": "refactor", "section": "Refactoring", "hidden": false },
+            { "type": "build", "hidden": true },
+            { "type": "chore", "hidden": true },
+            { "type": "ci", "hidden": true },
+            { "type": "docs", "hidden": true },
+            { "type": "test", "hidden": true }
+          ]
+        }
+      }
+    ],
+    [
+      "@semantic-release/changelog",
+      {
+        "changelogFile": "CHANGELOG.md"
+      }
+    ],
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "bash .github/scripts/prepare-release.sh ${nextRelease.version}"
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": [
+          "CHANGELOG.md",
+          "src/prowl/__about__.py"
+        ],
+        "message": "chore(release): ${nextRelease.version} [skip ci]\n\n${nextRelease.notes}"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "assets": [
+          "dist/*.whl",
+          "dist/*.tar.gz"
+        ],
+        "successComment": false,
+        "failComment": false,
+        "releasedLabels": false
+      }
+    ],
+    [
+      "@cleyrop-org/semantic-release-backmerge",
+      {
+        "backmergeBranches": [{ "from": "main", "to": "dev" }],
+        "clearWorkspace": true
+      }
+    ]
+  ]
+}
