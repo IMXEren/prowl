@@ -88,7 +88,7 @@ class FakeSite:
         self.source = source
         self.delay = delay
         self.error = error
-        self.get_calls: list[tuple[str, int, dict[str, str] | None]] = []
+        self.get_calls: list[tuple[str, int, dict[str, str] | None, str | None]] = []
         self.post_calls: list[tuple[str, int, str, dict[str, str] | None]] = []
         self.active = 0
         self.max_active = 0
@@ -105,8 +105,15 @@ class FakeSite:
         finally:
             self.active -= 1
 
-    async def get(self, url: str, timeout: int, headers: dict[str, str] | None = None) -> Source:
-        self.get_calls.append((url, timeout, headers))
+    async def get(
+        self,
+        url: str,
+        timeout: int,
+        *,
+        headers: dict[str, str] | None = None,
+        header_scope: str | None = None,
+    ) -> Source:
+        self.get_calls.append((url, timeout, headers, header_scope))
         return await self._run()
 
     async def post(
@@ -188,11 +195,21 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         await backend.fetch(None, FetchRequest(url="https://example.com/", cookies=cookies))
         self.assertEqual(group.tab.cookies, cookies)
 
-    async def test_get_headers_forwarded_to_site(self) -> None:
+    async def test_get_forwards_validated_scoped_headers_to_site(self) -> None:
         site = FakeSite(_source())
         backend, _browser, _group = self._install(site)
-        await backend.fetch(None, FetchRequest(url="https://example.com/", headers={"accept": "application/json"}))
-        self.assertEqual(site.get_calls[0][2], {"accept": "application/json"})
+        await backend.fetch(
+            None,
+            FetchRequest(
+                url="https://example.com/",
+                headers={"authorization": "Bearer token"},
+                header_scope="document",
+            ),
+        )
+        self.assertEqual(
+            site.get_calls[0],
+            ("https://example.com/", 60, {"authorization": "Bearer token"}, "document"),
+        )
 
     async def test_post_forwarded_with_body_and_headers(self) -> None:
         site = FakeSite(_source())

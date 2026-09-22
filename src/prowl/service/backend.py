@@ -29,6 +29,7 @@ class FetchRequest:
     method: str = "GET"
     timeout_seconds: int = 60
     headers: dict[str, str] = field(default_factory=dict)
+    header_scope: str | None = None
     cookies: list[dict[str, Any]] = field(default_factory=list)
     post_data: str = ""
 
@@ -110,8 +111,15 @@ class BrowserBackend:
                 post_data=request.post_data,
                 headers=request.headers,
             )
+        elif request.headers:
+            source = await site.get(
+                request.url,
+                request.timeout_seconds,
+                headers=request.headers,
+                header_scope=request.header_scope,
+            )
         else:
-            source = await site.get(request.url, request.timeout_seconds, headers=request.headers)
+            source = await site.get(request.url, request.timeout_seconds)
 
         cookies = _normalize_cookies(await _collect_cookies(group))
         return FetchResult(

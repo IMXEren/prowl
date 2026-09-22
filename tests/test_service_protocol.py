@@ -45,7 +45,6 @@ FLARESOLVERR_GET = {
     "cookies": [{"name": "session", "value": "abc", "domain": ".example.com", "path": "/"}],
     "returnOnlyCookies": False,
     "proxy": {"url": "socks5://127.0.0.1:1080"},
-    "headers": {"accept": "application/json"},
 }
 
 #: A proxied FlareSolverr payload: the client clears session/TTL when a proxy is set.
@@ -247,7 +246,7 @@ class ProtocolDispatchTests(IsolatedAsyncioTestCase):
         self.assertEqual(session, "example")
         self.assertEqual(request.url, "https://example.com/api/graphql")
         self.assertEqual(request.timeout_seconds, 60)
-        self.assertEqual(request.headers, {"accept": "application/json"})
+        self.assertEqual(request.headers, {})
         self.assertEqual(request.cookies, [{"name": "session", "value": "abc", "domain": ".example.com", "path": "/"}])
 
         solution = body["solution"]
@@ -298,20 +297,98 @@ class ProtocolValidationTests(IsolatedAsyncioTestCase):
         status, _ = await self._error({"cmd": "request.get"})
         self.assertEqual(status, 400)
 
-    async def test_browser_controlled_headers_rejected(self) -> None:
-        for name in ("Host", "Cookie", "Content-Length", "Proxy-Authorization", "Connection"):
+    async def test_get_headers_require_an_explicit_scope(self) -> None:
+        status, body = await self._error(
+            {"cmd": "request.get", "url": "https://example.com/", "headers": {"Authorization": "token"}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("headerScope", body["message"])
+
+    async def test_get_scoped_custom_headers_accepted(self) -> None:
+        for scope in ("document", "origin"):
+            with self.subTest(scope=scope):
+                backend = FakeBackend()
+                await Service(_config(), backend).handle(
+                    {
+                        "cmd": "request.get",
+                        "url": "https://example.com/",
+                        "headers": {"Authorization": "Bearer token", "X-API-Key": "secret"},
+                        "headerScope": scope,
+                    },
+                )
+                request = backend.requests[0][1]
+                self.assertEqual(request.headers, {"authorization": "Bearer token", "x-api-key": "secret"})
+                self.assertEqual(request.header_scope, scope)
+
+    async def test_get_browser_controlled_headers_rejected_even_when_scoped(self) -> None:
+        for name in ("Accept", "Accept-Language", "User-Agent", "Sec-Fetch-Site", "sec-ch-ua-platform"):
             status, body = await self._error(
-                {"cmd": "request.get", "url": "https://example.com/", "headers": {name: "x"}},
+                {
+                    "cmd": "request.get",
+                    "url": "https://example.com/",
+                    "headers": {name: "x"},
+                    "headerScope": "origin",
+                },
             )
             self.assertEqual(status, 400, name)
             self.assertIn("cannot be set", body["message"])
 
-    async def test_safe_headers_accepted(self) -> None:
+    async def test_header_scope_validation(self) -> None:
+        for value in ("", "page", "same-site", 1, True):
+            status, body = await self._error(
+                {
+                    "cmd": "request.get",
+                    "url": "https://example.com/",
+                    "headers": {"Authorization": "token"},
+                    "headerScope": value,
+                },
+            )
+            self.assertEqual(status, 400, value)
+            self.assertIn("headerScope", body["message"])
+
+        status, body = await self._error(
+            {"cmd": "request.get", "url": "https://example.com/", "headerScope": "document"},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("requires", body["message"])
+
+        status, body = await self._error(
+            {
+                "cmd": "request.post",
+                "url": "https://example.com/",
+                "headers": {"Content-Type": "application/json"},
+                "headerScope": "origin",
+            },
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("request.get", body["message"])
+
+    async def test_post_browser_controlled_headers_rejected(self) -> None:
+        for name in ("Host", "Cookie", "Content-Length", "Proxy-Authorization", "Connection", "Sec-Fetch-Dest"):
+            status, body = await self._error(
+                {"cmd": "request.post", "url": "https://example.com/", "headers": {name: "x"}},
+            )
+            self.assertEqual(status, 400, name)
+            self.assertIn("cannot be set", body["message"])
+
+    async def test_post_rejects_headers_beyond_content_type(self) -> None:
+        status, body = await self._error(
+            {"cmd": "request.post", "url": "https://example.com/", "headers": {"x-test": "1"}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("not accepted", body["message"])
+
+    async def test_post_content_type_accepted(self) -> None:
         backend = FakeBackend()
         await Service(_config(), backend).handle(
-            {"cmd": "request.get", "url": "https://example.com/", "headers": {"Accept": "application/json"}},
+            {
+                "cmd": "request.post",
+                "url": "https://example.com/",
+                "headers": {"Content-Type": "application/json"},
+                "postData": "{}",
+            },
         )
-        self.assertEqual(backend.requests[0][1].headers, {"accept": "application/json"})
+        self.assertEqual(backend.requests[0][1].headers, {"content-type": "application/json"})
 
     async def test_post_data_on_get_rejected(self) -> None:
         status, _ = await self._error({"cmd": "request.get", "url": "https://example.com/", "postData": "a=b"})
@@ -393,14 +470,14 @@ class ProtocolValidationTests(IsolatedAsyncioTestCase):
     async def test_header_names_must_be_tokens(self) -> None:
         for name in ("bad name", "bad:name", "bad\nname", ""):
             status, _ = await self._error(
-                {"cmd": "request.get", "url": "https://example.com/", "headers": {name: "x"}},
+                {"cmd": "request.post", "url": "https://example.com/", "headers": {name: "x"}},
             )
             self.assertEqual(status, 400, name)
 
     async def test_header_values_reject_crlf(self) -> None:
         for value in ("a\r\nInjected: x", "a\nb"):
             status, _ = await self._error(
-                {"cmd": "request.get", "url": "https://example.com/", "headers": {"x-test": value}},
+                {"cmd": "request.post", "url": "https://example.com/", "headers": {"x-test": value}},
             )
             self.assertEqual(status, 400, value)
 
