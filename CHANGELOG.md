@@ -1,3 +1,10 @@
+## [1.0.1-dev.1](https://github.com/IMXEren/prowl/compare/v1.0.0...v1.0.1-dev.1) (2026-09-22)
+
+### Bug Fixes
+
+* **browser:** isolate custom request headers ([681eadb](https://github.com/IMXEren/prowl/commit/681eadb195314236cb4268cdc1f926cf840fbe88))
+* **service:** validate and scope browser headers ([ef553d7](https://github.com/IMXEren/prowl/commit/ef553d7560d78c02240e63290810d48a76344d82))
+
 ## 1.0.0 (2026-09-22)
 
 ### Bug Fixes
