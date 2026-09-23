@@ -242,6 +242,16 @@ runs are reproducible offline. Any live target check is opt-in and must be run e
   retention resolves the platform manifests of every image it keeps and never removes one
   a retained image still references; only manifests whose parent it removed are pruned, and
   a resolution failure leaves untagged manifests in place.
+- The image is published with a personal access token, never `GITHUB_TOKEN`. A
+  `GITHUB_TOKEN` push links the package to the workflow repository, and a package linked to a
+  public repository is created public. A token push creates an unlinked package, and an
+  unlinked package is private, so the published image is private by construction.
+  `PROWL_GHCR_TOKEN` needs `write:packages`, and `delete:packages` as well if retention is to
+  prune old versions.
+- The guards around that are checks, not the mechanism. Before anything is uploaded, an
+  existing package must report private, and the same is verified after the push. A package
+  that does not exist yet is allowed through, because the token push creates it unlinked and
+  private, so the first release needs no manual bootstrap.
 
 Prowl is not published to a public package or container registry. Install from source, a
 GitHub Release asset, or a pinned Git revision, build locally, or authenticate to the
