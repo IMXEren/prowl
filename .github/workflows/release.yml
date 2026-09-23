@@ -50,51 +50,13 @@ jobs:
       - name: Audit source artifacts
         run: uv run python .github/scripts/audit_artifacts.py dist --expect-version "$(uv run python -c 'from prowl.__about__ import __version__; print(__version__)')"
 
-      - name: Fetch private fingerprint fonts
-        if: github.repository == 'IMXEren/prowl'
-        uses: actions/checkout@v7
-        with:
-          repository: IMXEren/extra-fonts
-          token: ${{ secrets.SECRET_GITHUB_PAT }}
-          lfs: true
-          path: .private-fonts
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build local image with fingerprint fonts
-        if: github.repository == 'IMXEren/prowl'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          build-contexts: |
-            windows_fonts=.private-fonts
-          load: true
-          push: false
-          tags: prowl:ci
-
-      - name: Build local image without private fonts
-        if: github.repository != 'IMXEren/prowl'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          push: false
-          tags: prowl:ci
-
-      - name: Smoke-test local image
-        run: docker run --rm --entrypoint python prowl:ci -c "import prowl"
-
-      - name: Verify private fonts were installed
-        if: github.repository == 'IMXEren/prowl'
-        run: docker run --rm --entrypoint sh prowl:ci -c 'test -n "$(find /usr/share/fonts/windows -type f -print -quit)"'
-
   release:
-    name: Publish GitHub release
+    name: Publish GitHub release and private image
     needs: verify
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      packages: write
     steps:
       - name: Check out the complete release history
         uses: actions/checkout@v7
@@ -121,9 +83,51 @@ jobs:
       - name: Install release tooling
         run: npm ci
 
-      - name: Release to GitHub
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Release to GitHub and GHCR
         uses: cycjimmy/semantic-release-action@v6
         with:
           working_directory: .
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROWL_GHCR_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
+          PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
+
+      - name: Upload the released image descriptor
+        if: ${{ always() && hashFiles('release-image.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-image
+          path: release-image.json
+          if-no-files-found: ignore
+
+  image-arm64:
+    name: Add the native arm64 image
+    needs: release
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the complete release history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download the released image descriptor
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-image
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build arm64 and merge it into the released tags
+        env:
+          PROWL_GHCR_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
+          PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
+        run: bash .github/scripts/add-arm64-image.sh

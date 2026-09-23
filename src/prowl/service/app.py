@@ -136,6 +136,7 @@ class Service:
             method=command.method,
             timeout_seconds=command.timeout_seconds,
             headers=command.headers,
+            header_scope=command.header_scope,
             cookies=command.cookies,
             post_data=command.post_data or "",
         )

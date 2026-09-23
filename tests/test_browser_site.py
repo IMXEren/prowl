@@ -1,7 +1,7 @@
-"""Tests for Site request fidelity: headers, cookie ordering, and POST preflight.
+"""Tests for Site request fidelity: header isolation, cookie ordering, and POST preflight.
 
-The tab group is replaced by a fake so header application/cleanup, origin-root
-warmup ordering, and cancellation cleanup are verified without a live browser.
+The tab group is replaced by a fake so that header isolation, origin-root warmup
+ordering, and cancellation cleanup are verified without a live browser.
 """
 
 from __future__ import annotations
@@ -17,13 +17,44 @@ from prowl.browser.site import Site, Source
 
 
 class FakePage:
-    """Records extra HTTP header application."""
+    """Records scoped routes installed on the Playwright page."""
 
     def __init__(self) -> None:
-        self.header_calls: list[dict[str, str]] = []
+        self.main_frame = object()
+        self.routes: list[tuple[Any, Any]] = []
+        self.unroutes: list[tuple[Any, Any]] = []
 
-    async def set_extra_http_headers(self, headers: dict[str, str]) -> None:
-        self.header_calls.append(dict(headers))
+    async def route(self, pattern: Any, handler: Any) -> None:
+        self.routes.append((pattern, handler))
+
+    async def unroute(self, pattern: Any, handler: Any) -> None:
+        self.unroutes.append((pattern, handler))
+
+
+class FakeRequest:
+    """A routable browser request with browser-generated headers."""
+
+    def __init__(self, page: FakePage, url: str, *, navigation: bool = False, main_frame: bool = True) -> None:
+        self.url = url
+        self.frame = page.main_frame if main_frame else object()
+        self._navigation = navigation
+
+    def is_navigation_request(self) -> bool:
+        return self._navigation
+
+    async def all_headers(self) -> dict[str, str]:
+        return {"accept": "text/html", "user-agent": "browser-owned"}
+
+
+class FakeRoute:
+    """Records whether a request continued with modified headers."""
+
+    def __init__(self, request: FakeRequest) -> None:
+        self.request = request
+        self.continued_headers: dict[str, str] | None = None
+
+    async def continue_(self, *, headers: dict[str, str] | None = None) -> None:
+        self.continued_headers = headers
 
 
 class FakeTab:
@@ -98,41 +129,112 @@ async def _post_result(_url: str, _post_data: str, _headers: dict[str, str]) -> 
     return {"status": 200, "headers": {"content-type": "text/html"}, "body": "<html></html>", "userAgent": "UA"}
 
 
-class SiteGetHeaderTests(IsolatedAsyncioTestCase):
-    """GET applies caller headers and always clears them."""
+class SiteGetHeaderIsolationTests(IsolatedAsyncioTestCase):
+    """GET leaves headers alone by default and scopes explicit custom headers."""
 
-    async def _get(self, group: FakeTabGroup, headers: dict[str, str] | None) -> None:
+    async def _get(
+        self,
+        group: FakeTabGroup,
+        *,
+        fail: bool = False,
+        headers: dict[str, str] | None = None,
+        header_scope: str | None = None,
+    ) -> None:
         site = Site(group)
+        build = AsyncMock(side_effect=RuntimeError("boom")) if fail else AsyncMock(return_value=Element("html"))
         with (
             patch.object(Site, "_add_network_listeners", AsyncMock()),
             patch.object(Site, "_check_if_loaded", AsyncMock(return_value=True)),
             patch.object(Site, "_wait_page_load", AsyncMock()),
-            patch.object(Site, "build_dom_tree", AsyncMock(return_value=Element("html"))),
+            patch.object(Site, "build_dom_tree", build),
         ):
-            await site.get("https://example.com/page", 30, headers=headers)
+            if fail:
+                with self.assertRaises(Exception):  # noqa: B017
+                    await site.get(
+                        "https://example.com/page",
+                        30,
+                        headers=headers,
+                        header_scope=header_scope,
+                    )
+            else:
+                await site.get(
+                    "https://example.com/page",
+                    30,
+                    headers=headers,
+                    header_scope=header_scope,
+                )
 
-    async def test_headers_are_applied_then_cleared(self) -> None:
-        group = FakeTabGroup()
-        await self._get(group, {"accept": "application/json"})
-        self.assertEqual(group.ppage.header_calls, [{"accept": "application/json"}, {}])
+    async def _route(self, group: FakeTabGroup, request: FakeRequest) -> FakeRoute:
+        handler = group.ppage.routes[0][1]
+        route = FakeRoute(request)
+        await handler(route)
+        return route
 
-    async def test_absent_headers_touch_nothing(self) -> None:
+    async def test_get_leaves_page_headers_untouched(self) -> None:
         group = FakeTabGroup()
-        await self._get(group, None)
-        self.assertEqual(group.ppage.header_calls, [])
+        await self._get(group)
+        self.assertEqual(group.ppage.routes, [])
 
-    async def test_headers_cleared_on_failure(self) -> None:
+    async def test_document_scope_modifies_only_initial_main_frame(self) -> None:
         group = FakeTabGroup()
-        site = Site(group)
-        with (
-            patch.object(Site, "_add_network_listeners", AsyncMock()),
-            patch.object(Site, "_check_if_loaded", AsyncMock(return_value=True)),
-            patch.object(Site, "_wait_page_load", AsyncMock()),
-            patch.object(Site, "build_dom_tree", AsyncMock(side_effect=RuntimeError("boom"))),
-            self.assertRaises(Exception),  # noqa: B017
+        await self._get(group, headers={"authorization": "Bearer token"}, header_scope="document")
+
+        matcher = group.ppage.routes[0][0]
+        self.assertTrue(matcher("https://example.com/page"))
+        self.assertFalse(matcher("https://example.com/app.js"))
+        self.assertFalse(matcher("https://cdn.example.com/page"))
+        document = await self._route(
+            group,
+            FakeRequest(group.ppage, "https://example.com/page", navigation=True),
+        )
+        subresource = await self._route(group, FakeRequest(group.ppage, "https://example.com/app.js"))
+        child_navigation = await self._route(
+            group,
+            FakeRequest(group.ppage, "https://example.com/page", navigation=True, main_frame=False),
+        )
+        repeated_navigation = await self._route(
+            group,
+            FakeRequest(group.ppage, "https://example.com/page", navigation=True),
+        )
+        self.assertEqual(document.continued_headers["authorization"], "Bearer token")
+        self.assertEqual(document.continued_headers["user-agent"], "browser-owned")
+        self.assertIsNone(subresource.continued_headers)
+        self.assertIsNone(child_navigation.continued_headers)
+        self.assertIsNone(repeated_navigation.continued_headers)
+
+    async def test_origin_scope_never_modifies_another_origin(self) -> None:
+        group = FakeTabGroup()
+        await self._get(group, headers={"x-api-key": "token"}, header_scope="origin")
+
+        matcher = group.ppage.routes[0][0]
+        self.assertTrue(matcher("https://example.com/api"))
+        self.assertTrue(matcher("https://example.com:443/asset"))
+        self.assertFalse(matcher("https://cdn.example.com/asset"))
+        self.assertFalse(matcher("https://example.com:444/asset"))
+        self.assertFalse(matcher("https://challenges.example.net/widget.js"))
+        same_origin = await self._route(group, FakeRequest(group.ppage, "https://example.com/api"))
+        explicit_default_port = await self._route(group, FakeRequest(group.ppage, "https://example.com:443/asset"))
+        self.assertEqual(same_origin.continued_headers["x-api-key"], "token")
+        self.assertEqual(explicit_default_port.continued_headers["x-api-key"], "token")
+
+    async def test_scoped_route_is_removed_after_success_and_failure(self) -> None:
+        for fail in (False, True):
+            with self.subTest(fail=fail):
+                group = FakeTabGroup()
+                await self._get(group, fail=fail, headers={"authorization": "token"}, header_scope="document")
+                self.assertEqual(group.ppage.unroutes, group.ppage.routes)
+
+    async def test_core_rejects_unsafe_headers(self) -> None:
+        for headers, message in (
+            ({"user-agent": "fake"}, "browser-controlled"),
+            ({"bad name": "value"}, "invalid header name"),
+            ({"x-api-key": "value\r\ninjected: true"}, "must not contain"),
         ):
-            await site.get("https://example.com/page", 30, headers={"accept": "text/plain"})
-        self.assertEqual(group.ppage.header_calls, [{"accept": "text/plain"}, {}])
+            with self.subTest(headers=headers):
+                group = FakeTabGroup()
+                with self.assertRaisesRegex(Exception, message):
+                    await self._get(group, headers=headers, header_scope="origin")
+                self.assertEqual(group.ppage.routes, [])
 
 
 class SitePostPreflightTests(IsolatedAsyncioTestCase):

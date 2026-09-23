@@ -1,3 +1,28 @@
+## [1.1.0-dev.2](https://github.com/IMXEren/prowl/compare/v1.1.0-dev.1...v1.1.0-dev.2) (2026-09-23)
+
+### Bug Fixes
+
+* **release:** publish the image with a personal access token ([975c118](https://github.com/IMXEren/prowl/commit/975c1186aa347fed1f8db45c2f2ead0498bb3a7e))
+
+## [1.1.0-dev.1](https://github.com/IMXEren/prowl/compare/v1.0.1-dev.1...v1.1.0-dev.1) (2026-09-23)
+
+### Bug Fixes
+
+* **release:** keep platform manifests a retained image needs ([e98bf35](https://github.com/IMXEren/prowl/commit/e98bf35bf9ef3bde315026c1f9738919f075214c))
+* **release:** make the arm64 merge run and push by digest ([f30d258](https://github.com/IMXEren/prowl/commit/f30d258872caa1e0e02a1525821d12459420f3a9))
+
+### New Features
+
+* **release:** publish a native arm64 image ([933bd88](https://github.com/IMXEren/prowl/commit/933bd883aa12b656f6fdf945ad6bf9ae6413747a))
+* **release:** publish the private GHCR image ([c161259](https://github.com/IMXEren/prowl/commit/c161259650ca89a09959f401faf5151a86de4781))
+
+## [1.0.1-dev.1](https://github.com/IMXEren/prowl/compare/v1.0.0...v1.0.1-dev.1) (2026-09-22)
+
+### Bug Fixes
+
+* **browser:** isolate custom request headers ([681eadb](https://github.com/IMXEren/prowl/commit/681eadb195314236cb4268cdc1f926cf840fbe88))
+* **service:** validate and scope browser headers ([ef553d7](https://github.com/IMXEren/prowl/commit/ef553d7560d78c02240e63290810d48a76344d82))
+
 ## 1.0.0 (2026-09-22)
 
 ### Bug Fixes

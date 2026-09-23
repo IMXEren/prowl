@@ -14,3 +14,4 @@ build/
 browser-profile*/
 browser_cookies.json
 .env
+release-image.json

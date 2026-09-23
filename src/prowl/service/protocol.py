@@ -17,6 +17,8 @@ from importlib.metadata import version as _distribution_version
 from typing import Any, Final
 from urllib.parse import urlsplit
 
+from prowl.browser.headers import HEADER_SCOPES, normalize_custom_headers
+
 CMD_REQUEST_GET: Final[str] = "request.get"
 CMD_REQUEST_POST: Final[str] = "request.post"
 CMD_SESSIONS_CREATE: Final[str] = "sessions.create"
@@ -40,7 +42,6 @@ MAX_TTL_MINUTES: Final[int] = 60 * 24 * 7
 #: Conservative bound on caller-supplied logical session names.
 MAX_SESSION_ID_LENGTH: Final[int] = 128
 _SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._:-]+$")
-_HTTP_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
 #: Fields each command accepts. Anything else is rejected as unknown.
 _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
@@ -53,6 +54,7 @@ _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
         "cookies",
         "returnOnlyCookies",
         "headers",
+        "headerScope",
         "proxy",
         "postData",
     },
@@ -61,24 +63,9 @@ _SESSIONS_CREATE_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "session", "s
 _SESSIONS_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd"})
 _SESSIONS_DESTROY_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "session"})
 
-#: Request headers the browser owns. A caller cannot override them without
-#: breaking the shared profile's trust or the browser's own framing.
-FORBIDDEN_HEADERS: Final[frozenset[str]] = frozenset(
-    {
-        "connection",
-        "content-encoding",
-        "content-length",
-        "cookie",
-        "expect",
-        "host",
-        "keep-alive",
-        "proxy-authorization",
-        "te",
-        "trailer",
-        "transfer-encoding",
-        "upgrade",
-    },
-)
+#: The only POST header a caller may set. It carries no browser identity and
+#: is needed to send a JSON body from the page's own ``fetch``.
+POST_CALLER_HEADERS: Final[frozenset[str]] = frozenset({"content-type"})
 
 
 def _resolve_version() -> str:
@@ -115,6 +102,7 @@ class FetchCommand:
     session: str | None = None
     session_ttl_minutes: int | None = None
     headers: dict[str, str] = field(default_factory=dict)
+    header_scope: str | None = None
     cookies: list[dict[str, Any]] = field(default_factory=list)
     post_data: str | None = None
     return_only_cookies: bool = False
@@ -203,7 +191,8 @@ def _reject_unknown_fields(payload: dict[str, Any], allowed: frozenset[str]) -> 
 def _parse_fetch(payload: dict[str, Any], cmd: str) -> FetchCommand:
     url = _parse_url(payload.get("url"))
 
-    headers = _parse_headers(payload.get("headers"))
+    header_scope = _parse_header_scope(payload.get("headerScope"), cmd)
+    headers = _parse_headers(payload.get("headers"), cmd, header_scope)
     cookies = _parse_cookies(payload.get("cookies"))
     post_data = _parse_post_data(payload.get("postData"), cmd)
     session = _optional_session(payload.get("session"))
@@ -219,6 +208,7 @@ def _parse_fetch(payload: dict[str, Any], cmd: str) -> FetchCommand:
         session=session,
         session_ttl_minutes=ttl,
         headers=headers,
+        header_scope=header_scope,
         cookies=cookies,
         post_data=post_data,
         return_only_cookies=_parse_bool(payload.get("returnOnlyCookies"), "returnOnlyCookies"),
@@ -260,23 +250,45 @@ def _parse_bool(value: Any, field_name: str) -> bool:
     return value
 
 
-def _parse_headers(value: Any) -> dict[str, str]:
+def _parse_header_scope(value: Any, cmd: str) -> str | None:
+    if value is None:
+        return None
+    if cmd != CMD_REQUEST_GET:
+        msg = "headerScope is supported only for request.get"
+        raise ProtocolError(msg, http_status=400)
+    if not isinstance(value, str) or value not in HEADER_SCOPES:
+        msg = f"headerScope must be one of: {', '.join(sorted(HEADER_SCOPES))}"
+        raise ProtocolError(msg, http_status=400)
+    return value
+
+
+def _parse_header_object(value: Any) -> dict[str, str]:
     if value is None:
         return {}
     if not isinstance(value, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
         msg = "headers must be an object of string values"
         raise ProtocolError(msg, http_status=400)
-    for name, val in value.items():
-        if not _HTTP_TOKEN_RE.match(name):
-            msg = f"invalid header name: {name!r}"
+    try:
+        return normalize_custom_headers(value)
+    except ValueError as error:
+        raise ProtocolError(str(error), http_status=400) from error
+
+
+def _parse_headers(value: Any, cmd: str, header_scope: str | None) -> dict[str, str]:
+    lowered = _parse_header_object(value)
+    if not lowered:
+        if header_scope is not None:
+            msg = "headerScope requires at least one request header"
             raise ProtocolError(msg, http_status=400)
-        if "\r" in val or "\n" in val:
-            msg = f"header {name!r} value must not contain CR or LF"
+        return lowered
+    if cmd == CMD_REQUEST_GET:
+        if header_scope is None:
+            msg = "request.get headers require headerScope=document or headerScope=origin"
             raise ProtocolError(msg, http_status=400)
-    lowered = {key.lower(): val for key, val in value.items()}
-    forbidden = sorted(name for name in lowered if name in FORBIDDEN_HEADERS)
-    if forbidden:
-        msg = f"header(s) cannot be set by callers: {', '.join(forbidden)}"
+        return lowered
+    unsupported = sorted(name for name in lowered if name not in POST_CALLER_HEADERS)
+    if unsupported:
+        msg = f"header(s) are not accepted: {', '.join(unsupported)}"
         raise ProtocolError(msg, http_status=400)
     return lowered
 
