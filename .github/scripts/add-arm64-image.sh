@@ -34,7 +34,7 @@ cleanup() {
 trap cleanup EXIT
 
 actor="${GITHUB_ACTOR:?GITHUB_ACTOR is required}"
-token="${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
+token="${PROWL_GHCR_TOKEN:?PROWL_GHCR_TOKEN is required to publish the image}"
 
 # Build exactly the commit that was released, not whatever the branch has moved on to.
 git checkout --quiet "v${version}"

@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 # Publish the private GHCR image for a semantic-release version, then retain it.
+#
+# The package is created by a personal access token, never by GITHUB_TOKEN. A
+# GITHUB_TOKEN push links the package to the workflow repository, and a package
+# linked to a public repository is created public, which is not reversible. A
+# token push creates an unlinked package, and an unlinked package is private.
 set -euo pipefail
 
 version="${1:?semantic-release version is required}"
@@ -18,10 +23,18 @@ owner="${PROWL_GHCR_OWNER:-${registry_and_path%%/*}}"
 package="${PROWL_GHCR_PACKAGE:-${registry_and_path#*/}}"
 owner_type="${PROWL_GHCR_OWNER_TYPE:-user}"
 actor="${GITHUB_ACTOR:?GITHUB_ACTOR is required}"
-token="${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
+token="${PROWL_GHCR_TOKEN:?PROWL_GHCR_TOKEN is required to publish the image}"
+package_args=(--owner "$owner" --package "$package" --owner-type "$owner_type")
 
-visibility_args=(--owner "$owner" --package "$package" --owner-type "$owner_type")
-python .github/scripts/ghcr_package.py "${visibility_args[@]}" verify-private --allow-missing
+# The package is created by the token push below, and a token push creates an
+# unlinked package, which is private. A package that already exists must report
+# private, because a container package cannot be relied on to be made private
+# again once it is public.
+if ! GITHUB_TOKEN="$token" python .github/scripts/ghcr_package.py "${package_args[@]}" \
+    verify-private --allow-missing; then
+    echo "::error title=Refusing to publish::${image} exists but is not private." >&2
+    exit 1
+fi
 
 printf '%s' "$token" | docker login ghcr.io --username "$actor" --password-stdin
 trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
@@ -79,9 +92,9 @@ with open("release-image.json", "w", encoding="utf-8") as handle:
 print(f"Recorded {image}:{version} ({digest}) for the arm64 merge")
 PY
 
-# A public container package can never be made private again, so this check is
-# the last line of defence and has to name the remediation explicitly.
-if ! python .github/scripts/ghcr_package.py "${visibility_args[@]}" verify-private; then
+# A public container package cannot be made private again, so this check is the
+# last line of defence and names the remediation explicitly.
+if ! GITHUB_TOKEN="$token" python .github/scripts/ghcr_package.py "${package_args[@]}" verify-private; then
     echo "::error title=Published image is not private::Delete ${image} and re-create it as private; GitHub cannot make a public package private again." >&2
     exit 1
 fi
@@ -90,7 +103,7 @@ fi
 # platform manifest, so retention must know which children a retained image
 # still references before it removes anything untagged.
 retain_args=(--current-tag "$version" --keep-prerelease 3 --keep-stable 2)
-kept_tags="$(python .github/scripts/ghcr_package.py "${visibility_args[@]}" kept-tags \
+kept_tags="$(GITHUB_TOKEN="$token" python .github/scripts/ghcr_package.py "${package_args[@]}" kept-tags \
     --current-tag "$version" --keep-prerelease 3 --keep-stable 2)" || kept_tags=""
 
 if [[ -n "$kept_tags" ]]; then
@@ -123,6 +136,7 @@ fi
 # Retention is cumulative housekeeping, so a failure must not mark an already
 # published release as failed. It must still be impossible to miss, and the
 # next release prunes whatever this run left behind.
-if ! python .github/scripts/ghcr_package.py "${visibility_args[@]}" retain "${retain_args[@]}" --execute; then
+if ! GITHUB_TOKEN="$token" python .github/scripts/ghcr_package.py "${package_args[@]}" retain \
+    "${retain_args[@]}" --execute; then
     echo "::warning title=GHCR retention failed::Could not prune old ${image} versions; the next release retries." >&2
 fi

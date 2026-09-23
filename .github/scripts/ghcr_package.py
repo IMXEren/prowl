@@ -87,18 +87,21 @@ def _owner_path(owner: str, owner_type: str) -> str:
     return f"/users/{encoded_owner}" if owner_type == "user" else f"/orgs/{encoded_owner}"
 
 
-def verify_private(owner: str, package: str, owner_type: str, *, allow_missing: bool) -> None:
-    """Require an existing package to be private without changing visibility."""
+def verify_private(owner: str, package: str, owner_type: str, *, allow_missing: bool = False) -> None:
+    """Require the package to be private, optionally tolerating a missing package.
+
+    A missing package is only tolerable because the image is published with a
+    personal access token, which creates an unlinked package that is private.
+    """
     package_name = quote(package, safe="")
     get_path = f"{_owner_path(owner, owner_type)}/packages/container/{package_name}"
     try:
         details, _ = _request(get_path)
     except PackageApiError as exc:
         if allow_missing and getattr(exc, "status", None) == _NOT_FOUND:
-            print("GHCR package does not exist yet; its first publication will default to private")
+            print("GHCR package does not exist yet; a token push creates it unlinked and private")
             return
         raise
-
     if details.get("visibility") != "private":
         msg = f"GHCR package visibility is {details.get('visibility')!r}, not 'private'; refusing publication"
         raise PackageApiError(msg)
@@ -353,8 +356,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--owner-type", choices=("user", "org"), default="user")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    visibility = subparsers.add_parser("verify-private")
-    visibility.add_argument("--allow-missing", action="store_true")
+    subparsers.add_parser("verify-private").add_argument("--allow-missing", action="store_true")
 
     retention = subparsers.add_parser("retain")
     retention.add_argument("--current-tag", required=True)
@@ -385,18 +387,7 @@ def main() -> int:
     args = _parse_args()
     try:
         if args.command == "verify-private":
-            for attempt in range(_MAX_VISIBILITY_ATTEMPTS):
-                try:
-                    verify_private(args.owner, args.package, args.owner_type, allow_missing=args.allow_missing)
-                    break
-                except PackageApiError as exc:
-                    if (
-                        getattr(exc, "status", None) != _NOT_FOUND
-                        or args.allow_missing
-                        or attempt == _MAX_VISIBILITY_ATTEMPTS - 1
-                    ):
-                        raise
-                    time.sleep(2**attempt)
+            verify_private(args.owner, args.package, args.owner_type, allow_missing=args.allow_missing)
         elif args.command == "kept-tags":
             for tag in retained_semver_tags(
                 list_versions(args.owner, args.package, args.owner_type),

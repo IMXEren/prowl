@@ -92,6 +92,7 @@ jobs:
           working_directory: .
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROWL_GHCR_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
           PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
 
       - name: Upload the released image descriptor
@@ -127,6 +128,6 @@ jobs:
 
       - name: Build arm64 and merge it into the released tags
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROWL_GHCR_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
           PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
         run: bash .github/scripts/add-arm64-image.sh
