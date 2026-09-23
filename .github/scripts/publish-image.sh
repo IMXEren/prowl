@@ -31,13 +31,28 @@ if [[ "$version" == *-* ]]; then
     moving_tag="dev"
 fi
 
+build_tag="prowl:release-${version}"
+
 PROWL_FONT_GITHUB_TOKEN="${PROWL_FONT_GITHUB_TOKEN:-}" \
     bash .github/scripts/build-image.sh \
-    --push \
+    --load \
     --label "org.opencontainers.image.source=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-IMXEren/prowl}" \
     --label "org.opencontainers.image.version=${version}" \
-    --tag "${image}:${version}" \
-    --tag "${image}:${moving_tag}"
+    --tag "$build_tag"
+
+# Smoke-test before anything reaches the registry, so a broken image is never
+# published. Pushing a locally built image also avoids the provenance/SBOM
+# attestation manifests that a buildx push would add as untagged versions.
+docker run --rm --entrypoint python "$build_tag" -c "import prowl"
+if [[ -n "${PROWL_FONT_GITHUB_TOKEN:-}" ]]; then
+    docker run --rm --entrypoint sh "$build_tag" -c \
+        'test -n "$(find /usr/share/fonts/windows -type f -print -quit)"'
+fi
+
+docker tag "$build_tag" "${image}:${version}"
+docker tag "$build_tag" "${image}:${moving_tag}"
+docker push "${image}:${version}"
+docker push "${image}:${moving_tag}"
 
 # A public container package can never be made private again, so this check is
 # the last line of defence and has to name the remediation explicitly.

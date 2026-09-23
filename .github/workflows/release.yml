@@ -50,20 +50,6 @@ jobs:
       - name: Audit source artifacts
         run: uv run python .github/scripts/audit_artifacts.py dist --expect-version "$(uv run python -c 'from prowl.__about__ import __version__; print(__version__)')"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and smoke-test local image
-        env:
-          PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
-        run: |
-          bash .github/scripts/build-image.sh --load --tag prowl:ci
-          docker run --rm --entrypoint python prowl:ci -c "import prowl"
-          if [[ -n "$PROWL_FONT_GITHUB_TOKEN" ]]; then
-            docker run --rm --entrypoint sh prowl:ci -c \
-              'test -n "$(find /usr/share/fonts/windows -type f -print -quit)"'
-          fi
-
   release:
     name: Publish GitHub release and private image
     needs: verify
