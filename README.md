@@ -231,8 +231,17 @@ runs are reproducible offline. Any live target check is opt-in and must be run e
 - `dev` produces prerelease GitHub Releases on the `dev` channel and immutable versioned
   image tags, with `dev` moving to the newest prerelease image.
 - Release assets are the audited Python wheel and source archive.
+- Each published image is a multi-platform index covering `linux/amd64` and `linux/arm64`.
+  Both platforms are built natively on their own runner, `amd64` by the release job and
+  `arm64` on an arm64 runner that merges its manifest into the tags the release created,
+  so no emulation is involved. A failure there leaves the `amd64` image published and
+  unchanged rather than replacing it with something incomplete.
 - The GHCR package is private and requires authorization; it is not a public distribution
   channel. Retention keeps the newest two stable and three prerelease image versions.
+  A multi-platform image is one tagged index plus one untagged manifest per platform, so
+  retention resolves the platform manifests of every image it keeps and never removes one
+  a retained image still references; only manifests whose parent it removed are pruned, and
+  a resolution failure leaves untagged manifests in place.
 
 Prowl is not published to a public package or container registry. Install from source, a
 GitHub Release asset, or a pinned Git revision, build locally, or authenticate to the
