@@ -1,3 +1,9 @@
+## [1.1.0-dev.2](https://github.com/IMXEren/prowl/compare/v1.1.0-dev.1...v1.1.0-dev.2) (2026-09-23)
+
+### Bug Fixes
+
+* **release:** publish the image with a personal access token ([975c118](https://github.com/IMXEren/prowl/commit/975c1186aa347fed1f8db45c2f2ead0498bb3a7e))
+
 ## [1.1.0-dev.1](https://github.com/IMXEren/prowl/compare/v1.0.1-dev.1...v1.1.0-dev.1) (2026-09-23)
 
 ### Bug Fixes
