@@ -93,3 +93,40 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
+
+      - name: Upload the released image descriptor
+        if: ${{ always() && hashFiles('.release-image.json') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-image
+          path: .release-image.json
+          if-no-files-found: ignore
+
+  image-arm64:
+    name: Add the native arm64 image
+    needs: release
+    if: ${{ needs.release.result == 'success' }}
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out the complete release history
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download the released image descriptor
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: release-image
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build arm64 and merge it into the released tags
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
+        run: bash .github/scripts/add-arm64-image.sh
