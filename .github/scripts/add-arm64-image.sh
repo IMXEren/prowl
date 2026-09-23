@@ -6,7 +6,7 @@
 # manifests into one index under the tags that release already created.
 set -euo pipefail
 
-descriptor=".release-image.json"
+descriptor="release-image.json"
 if [[ ! -f "$descriptor" ]]; then
     echo "No released image descriptor; this run published nothing to merge."
     exit 0
@@ -47,11 +47,10 @@ printf '%s' "$token" | docker login ghcr.io --username "$actor" --password-stdin
 metadata="$(mktemp)"
 PROWL_FONT_GITHUB_TOKEN="${PROWL_FONT_GITHUB_TOKEN:-}" \
     bash .github/scripts/build-image.sh \
-    --push \
     --platform linux/arm64 \
     --provenance=false \
     --sbom=false \
-    --output type=image,push=true,push-by-digest=true,name-canonical=true \
+    --output "type=image,name=${image},push=true,push-by-digest=true,name-canonical=true" \
     --label "org.opencontainers.image.source=${GITHUB_SERVER_URL:-https://github.com}/${GITHUB_REPOSITORY:-IMXEren/prowl}" \
     --label "org.opencontainers.image.version=${version}" \
     --metadata-file "$metadata"

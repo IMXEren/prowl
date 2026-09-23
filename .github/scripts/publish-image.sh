@@ -59,7 +59,8 @@ docker push "${image}:${version}"
 docker push "${image}:${moving_tag}"
 
 # Record what was published so the arm64 job can merge into the same manifest
-# instead of guessing which tags this run created.
+# instead of guessing which tags this run created. The name is deliberately not
+# hidden: upload-artifact excludes dotfiles unless include-hidden-files is set.
 amd64_digest="$(docker buildx imagetools inspect "${image}:${version}" --format '{{.Manifest.Digest}}')"
 python - "$version" "$moving_tag" "$image" "$amd64_digest" <<'PY'
 import json
@@ -72,7 +73,7 @@ descriptor = {
     "moving_tag": moving_tag,
     "amd64_digest": digest,
 }
-with open(".release-image.json", "w", encoding="utf-8") as handle:
+with open("release-image.json", "w", encoding="utf-8") as handle:
     json.dump(descriptor, handle, indent=2)
     handle.write("\n")
 print(f"Recorded {image}:{version} ({digest}) for the arm64 merge")

@@ -95,11 +95,11 @@ jobs:
           PROWL_FONT_GITHUB_TOKEN: ${{ secrets.SECRET_GITHUB_PAT }}
 
       - name: Upload the released image descriptor
-        if: ${{ always() && hashFiles('.release-image.json') != '' }}
+        if: ${{ always() && hashFiles('release-image.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: release-image
-          path: .release-image.json
+          path: release-image.json
           if-no-files-found: ignore
 
   image-arm64:
