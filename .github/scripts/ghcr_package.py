@@ -35,11 +35,18 @@ class RetentionSafetyError(RuntimeError):
 
 @dataclass(frozen=True)
 class PackageVersion:
-    """The package-version fields needed for retention decisions."""
+    """The package-version fields needed for retention decisions.
+
+    ``digest`` is the manifest digest GitHub reports as the version ``name``. For
+    a multi-platform image the tagged version is the index and each platform
+    manifest is an untagged version of its own, so the digest is what ties a
+    child back to the index that references it.
+    """
 
     version_id: int
     created_at: str
     tags: tuple[str, ...]
+    digest: str = ""
 
 
 def _request(path: str, *, method: str = "GET", payload: dict[str, Any] | None = None) -> tuple[Any, dict[str, str]]:
@@ -131,6 +138,7 @@ def list_versions(owner: str, package: str, owner_type: str) -> list[PackageVers
                     version_id=int(item["id"]),
                     created_at=str(item["created_at"]),
                     tags=tuple(str(tag) for tag in tags),
+                    digest=str(item.get("name") or ""),
                 )
             )
         path = _next_link(headers.get("link"))
@@ -204,6 +212,82 @@ def retention_plan(
     return protected, deletions
 
 
+def retained_semver_tags(
+    versions: list[PackageVersion],
+    current_tag: str,
+    *,
+    keep_prerelease: int,
+    keep_stable: int,
+) -> list[str]:
+    """Return the semantic-version tags of every manifest retention keeps.
+
+    The caller resolves these against the registry to learn which platform
+    manifests a retained image still needs.
+    """
+    protected, _ = retention_plan(
+        versions,
+        current_tag,
+        keep_prerelease=keep_prerelease,
+        keep_stable=keep_stable,
+    )
+    tags: set[str] = set()
+    for version in versions:
+        if version.version_id in protected:
+            tags.update(tag for tag in version.tags if _SEMVER.fullmatch(tag))
+    return sorted(tags)
+
+
+def orphaned_platform_manifests(
+    versions: list[PackageVersion],
+    protected_digests: frozenset[str],
+) -> list[PackageVersion]:
+    """Return untagged platform manifests that no retained image references.
+
+    A version is only considered orphaned when it has no tags, reports a digest,
+    and that digest is absent from every digest a retained manifest references.
+    An unknown digest is never treated as orphaned.
+    """
+    orphans = [
+        version
+        for version in versions
+        if not version.tags and version.digest and version.digest not in protected_digests
+    ]
+    orphans.sort(key=lambda version: (version.created_at, version.version_id))
+    return orphans
+
+
+def _delete_version(  # noqa: PLR0913
+    owner: str,
+    owner_type: str,
+    package: str,
+    version: PackageVersion,
+    description: str,
+    *,
+    execute: bool,
+    mode: str,
+) -> None:
+    """Report one planned deletion and perform it when executing."""
+    print(f"{mode} {description} {version.version_id}")
+    if not execute:
+        return
+    package_name = quote(package, safe="")
+    path = f"{_owner_path(owner, owner_type)}/packages/container/{package_name}/versions/{version.version_id}"
+    _request(path, method="DELETE")
+
+
+def _await_current_version(owner: str, package: str, owner_type: str, current_tag: str) -> list[PackageVersion]:
+    """List versions, retrying until the manifest this release just pushed appears."""
+    for attempt in range(_MAX_VISIBILITY_ATTEMPTS):
+        versions = list_versions(owner, package, owner_type)
+        if any(current_tag in version.tags for version in versions):
+            return versions
+        if attempt == _MAX_VISIBILITY_ATTEMPTS - 1:
+            msg = f"Current package version tagged {current_tag!r} did not become visible"
+            raise RetentionSafetyError(msg)
+        time.sleep(2**attempt)
+    return []
+
+
 def retain(  # noqa: PLR0913
     owner: str,
     package: str,
@@ -213,17 +297,11 @@ def retain(  # noqa: PLR0913
     keep_prerelease: int,
     keep_stable: int,
     execute: bool,
+    prune_untagged: bool = False,
+    protected_digests: frozenset[str] = frozenset(),
 ) -> None:
     """Plan and optionally execute bounded package-version retention."""
-    versions: list[PackageVersion] = []
-    for attempt in range(_MAX_VISIBILITY_ATTEMPTS):
-        versions = list_versions(owner, package, owner_type)
-        if any(current_tag in version.tags for version in versions):
-            break
-        if attempt == _MAX_VISIBILITY_ATTEMPTS - 1:
-            msg = f"Current package version tagged {current_tag!r} did not become visible"
-            raise RetentionSafetyError(msg)
-        time.sleep(2**attempt)
+    versions = _await_current_version(owner, package, owner_type, current_tag)
     protected, deletions = retention_plan(
         versions,
         current_tag,
@@ -232,15 +310,40 @@ def retain(  # noqa: PLR0913
     )
     mode = "Deleting" if execute else "Would delete"
     print(f"Retention protects package version IDs: {sorted(protected)}")
+
+    # Tagged manifests go first. Removing an index before its children means a
+    # retained index can never be left pointing at a manifest that is gone.
     if not deletions:
         print("No package versions are outside the retention windows")
-        return
-    package_name = quote(package, safe="")
     for version in deletions:
-        print(f"{mode} package version {version.version_id} with tags {list(version.tags)}")
-        if execute:
-            path = f"{_owner_path(owner, owner_type)}/packages/container/{package_name}/versions/{version.version_id}"
-            _request(path, method="DELETE")
+        _delete_version(
+            owner,
+            owner_type,
+            package,
+            version,
+            f"package version with tags {list(version.tags)}",
+            execute=execute,
+            mode=mode,
+        )
+
+    if not prune_untagged:
+        print("Untagged platform manifests were left in place because their parents were not resolved")
+        return
+
+    orphans = orphaned_platform_manifests(versions, protected_digests)
+    if not orphans:
+        print("No orphaned platform manifests to remove")
+        return
+    for version in orphans:
+        _delete_version(
+            owner,
+            owner_type,
+            package,
+            version,
+            f"orphaned platform manifest {version.digest}",
+            execute=execute,
+            mode=mode,
+        )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -258,6 +361,22 @@ def _parse_args() -> argparse.Namespace:
     retention.add_argument("--keep-prerelease", type=int, default=3)
     retention.add_argument("--keep-stable", type=int, default=2)
     retention.add_argument("--execute", action="store_true")
+    retention.add_argument(
+        "--prune-untagged",
+        action="store_true",
+        help="also remove untagged platform manifests that no retained image references",
+    )
+    retention.add_argument(
+        "--protect-digest",
+        action="append",
+        default=[],
+        help="a digest a retained image references; repeat for each child",
+    )
+
+    kept = subparsers.add_parser("kept-tags")
+    kept.add_argument("--current-tag", required=True)
+    kept.add_argument("--keep-prerelease", type=int, default=3)
+    kept.add_argument("--keep-stable", type=int, default=2)
     return parser.parse_args()
 
 
@@ -278,6 +397,14 @@ def main() -> int:
                     ):
                         raise
                     time.sleep(2**attempt)
+        elif args.command == "kept-tags":
+            for tag in retained_semver_tags(
+                list_versions(args.owner, args.package, args.owner_type),
+                args.current_tag,
+                keep_prerelease=args.keep_prerelease,
+                keep_stable=args.keep_stable,
+            ):
+                print(tag)
         else:
             retain(
                 args.owner,
@@ -287,6 +414,8 @@ def main() -> int:
                 keep_prerelease=args.keep_prerelease,
                 keep_stable=args.keep_stable,
                 execute=args.execute,
+                prune_untagged=args.prune_untagged,
+                protected_digests=frozenset(args.protect_digest),
             )
     except (PackageApiError, RetentionSafetyError) as exc:
         print(f"error: {exc}", file=sys.stderr)
