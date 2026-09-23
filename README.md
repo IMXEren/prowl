@@ -182,23 +182,34 @@ healthchecks `/healthz`. The service listens on `8191` on the Compose network on
 not published to the host by default. For an opt-in localhost-only debugging bind, use the
 commented `ports` block in `docker-compose.yml`. The image installs the CloakBrowser binary
 and the GeoIP database, runs as a non-root user, and keeps Chromium's `--no-sandbox`
-because containers do not grant the user namespaces its sandbox needs. The image is built
-locally from this public source (Compose tag `prowl:local`); no prebuilt Prowl image is
-published, so there is nothing to pull.
+because containers do not grant the user namespaces its sandbox needs. Compose builds
+locally from this public source with the tag `prowl:local`. Release builds also publish an
+authenticated, private image at `ghcr.io/imxeren/prowl`; no public Prowl image is published.
 
-Optionally improve fingerprint fidelity with a trusted Windows font archive. Put
-`fonts.zip` in a directory outside the source tree and provide that directory as a
-read-only named build context:
+Prowl's image helper optionally improves fingerprint fidelity with a trusted Windows font
+archive while keeping it outside the source context and Git history:
 
 ```bash
-mkdir -p ../prowl-private-fonts
-cp /private/path/fonts.zip ../prowl-private-fonts/fonts.zip
-docker build \
-  --build-context windows_fonts=../prowl-private-fonts \
-  -t prowl:local .
+# Public-source build without private fonts
+bash .github/scripts/build-image.sh --load --tag prowl:local
+
+# Local archive (resources/fonts.zip is also accepted)
+bash .github/scripts/build-image.sh \
+  --font-archive /private/path/fonts.zip \
+  --load --tag prowl:local
+
+# Or fetch fonts.zip from a private Git LFS repository
+PROWL_FONT_GITHUB_TOKEN=github_pat_... \
+PROWL_FONT_REPOSITORY=owner/font-assets \
+bash .github/scripts/build-image.sh --load --tag prowl:local
 ```
 
-The archive is not copied into Prowl's source context. BuildKit secrets are not used
+`PROWL_FONT_REPOSITORY` defaults to Prowl's configured font repository;
+`PROWL_FONT_REF` and `PROWL_FONT_ARCHIVE_PATH` select another revision or path. Temporary
+checkout and font material are removed after every build. If neither a local archive nor a
+font token is supplied, the same helper builds successfully with the Dockerfile's empty
+font context. Advanced callers can still provide a directory containing `fonts.zip` as
+Docker's read-only `windows_fonts` named build context. BuildKit secrets are not used
 because their payload is limited to 500 KiB, which is too small for the font archive.
 
 ## Browser-backed access and live smoke tests
@@ -215,12 +226,17 @@ runs are reproducible offline. Any live target check is opt-in and must be run e
 
 ## Releases
 
-- `main` produces stable GitHub Releases.
-- `dev` produces prerelease GitHub Releases on the `dev` channel.
+- `main` produces stable GitHub Releases and immutable `ghcr.io/imxeren/prowl:<version>`
+  image tags, with `latest` moving to the newest stable image.
+- `dev` produces prerelease GitHub Releases on the `dev` channel and immutable versioned
+  image tags, with `dev` moving to the newest prerelease image.
 - Release assets are the audited Python wheel and source archive.
+- The GHCR package is private and requires authorization; it is not a public distribution
+  channel. Retention keeps the newest two stable and three prerelease image versions.
 
-Prowl is not published to package or container registries. Install from source, a
-GitHub Release asset, or a pinned Git revision, and build the container locally.
+Prowl is not published to a public package or container registry. Install from source, a
+GitHub Release asset, or a pinned Git revision, build locally, or authenticate to the
+private image when access has been granted.
 
 ## License
 
