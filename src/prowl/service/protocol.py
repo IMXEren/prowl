@@ -24,9 +24,23 @@ CMD_REQUEST_POST: Final[str] = "request.post"
 CMD_SESSIONS_CREATE: Final[str] = "sessions.create"
 CMD_SESSIONS_LIST: Final[str] = "sessions.list"
 CMD_SESSIONS_DESTROY: Final[str] = "sessions.destroy"
+CMD_BROWSER_OPEN: Final[str] = "browser.open"
+CMD_BROWSER_CLOSE: Final[str] = "browser.close"
+CMD_BROWSER_LIST: Final[str] = "browser.list"
+CMD_COOKIES_LIST: Final[str] = "cookies.list"
 
 SUPPORTED_COMMANDS: Final[frozenset[str]] = frozenset(
-    {CMD_REQUEST_GET, CMD_REQUEST_POST, CMD_SESSIONS_CREATE, CMD_SESSIONS_LIST, CMD_SESSIONS_DESTROY},
+    {
+        CMD_REQUEST_GET,
+        CMD_REQUEST_POST,
+        CMD_SESSIONS_CREATE,
+        CMD_SESSIONS_LIST,
+        CMD_SESSIONS_DESTROY,
+        CMD_BROWSER_OPEN,
+        CMD_BROWSER_CLOSE,
+        CMD_BROWSER_LIST,
+        CMD_COOKIES_LIST,
+    },
 )
 
 ALLOWED_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
@@ -42,6 +56,9 @@ MAX_TTL_MINUTES: Final[int] = 60 * 24 * 7
 #: Conservative bound on caller-supplied logical session names.
 MAX_SESSION_ID_LENGTH: Final[int] = 128
 _SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+#: Conservative bound on an interactive tab id, which callers echo back to close one.
+MAX_TAB_ID_LENGTH: Final[int] = 64
 
 #: Fields each command accepts. Anything else is rejected as unknown.
 _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
@@ -62,6 +79,23 @@ _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
 _SESSIONS_CREATE_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "session", "session_ttl_minutes"})
 _SESSIONS_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd"})
 _SESSIONS_DESTROY_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "session"})
+
+#: ``browser.open`` takes the fetch's url, timeout and egress selector, the session that
+#: binds the tab to an egress, the cookies to seed the browser with before it navigates, and
+#: whether to open a second tab for a url that is already open. The tab stays open after the
+#: command returns, so there is no field for a method or a body.
+_BROWSER_OPEN_FIELDS: Final[frozenset[str]] = frozenset(
+    {"cmd", "url", "maxTimeout", "session", "cookies", "newTab", "proxy"},
+)
+_BROWSER_CLOSE_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "tab"})
+_BROWSER_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "tab"})
+
+#: ``cookies.list`` reads the cookies held by an egress's browser profile. ``url`` scopes the
+#: answer to the cookies that would be sent there, and ``proxy`` selects which profile is read.
+_COOKIES_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "url", "proxy"})
+
+#: Fields the ``proxy`` object may carry: a configured url, or a configured name.
+_PROXY_FIELDS: Final[frozenset[str]] = frozenset({"url", "name"})
 
 #: The only POST header a caller may set. It carries no browser identity and
 #: is needed to send a JSON body from the page's own ``fetch``.
@@ -92,6 +126,19 @@ class ProtocolError(Exception):
         self.http_status = http_status
 
 
+@dataclass(frozen=True, slots=True)
+class ProxySelection:
+    """A caller's egress request: a configured url, or a configured egress name.
+
+    A url keeps its original meaning, accepted only when it matches a configured
+    egress. A name selects one configured egress directly. Exactly one of the two
+    is set, and neither may embed credentials.
+    """
+
+    url: str | None = None
+    name: str | None = None
+
+
 @dataclass(slots=True)
 class FetchCommand:
     """A ``request.get`` or ``request.post`` command."""
@@ -106,7 +153,7 @@ class FetchCommand:
     cookies: list[dict[str, Any]] = field(default_factory=list)
     post_data: str | None = None
     return_only_cookies: bool = False
-    proxy_url: str | None = None
+    proxy: ProxySelection | None = None
 
     @property
     def method(self) -> str:
@@ -139,7 +186,59 @@ class SessionsDestroyCommand:
     session: str
 
 
-Command = FetchCommand | SessionsCreateCommand | SessionsListCommand | SessionsDestroyCommand
+@dataclass(slots=True)
+class BrowserOpenCommand:
+    """A ``browser.open`` command, which leaves the tab open when it returns."""
+
+    url: str
+    timeout_ms: int
+    session: str | None = None
+    cookies: list[dict[str, Any]] = field(default_factory=list)
+    new_tab: bool = False
+    proxy: ProxySelection | None = None
+
+    @property
+    def timeout_seconds(self) -> int:
+        """Return the command timeout rounded up to whole seconds."""
+        return max(1, (self.timeout_ms + 999) // 1000)
+
+
+@dataclass(slots=True)
+class CookiesListCommand:
+    """A ``cookies.list`` command. Without a url it reports every cookie in the profile."""
+
+    url: str | None = None
+    proxy: ProxySelection | None = None
+
+
+@dataclass(slots=True)
+class BrowserCloseCommand:
+    """A ``browser.close`` command. Without a tab it closes every interactive tab."""
+
+    tab: str | None = None
+
+
+@dataclass(slots=True)
+class BrowserListCommand:
+    """A ``browser.list`` command.
+
+    Without a tab it only reports the open tabs. A named tab is the one the caller is
+    displaying, and only that tab's idle countdown is refreshed.
+    """
+
+    tab: str | None = None
+
+
+Command = (
+    FetchCommand
+    | SessionsCreateCommand
+    | SessionsListCommand
+    | SessionsDestroyCommand
+    | BrowserOpenCommand
+    | BrowserCloseCommand
+    | BrowserListCommand
+    | CookiesListCommand
+)
 
 
 def now_ms() -> int:
@@ -168,6 +267,14 @@ def parse_request(payload: Any) -> Command:
     if cmd in (CMD_REQUEST_GET, CMD_REQUEST_POST):
         _reject_unknown_fields(payload, _FETCH_FIELDS)
         return _parse_fetch(payload, cmd)
+    return _parse_command(payload, cmd)
+
+
+def _parse_command(payload: dict[str, Any], cmd: str) -> Command:
+    """Parse a command other than a fetch, which owns its own field set.
+
+    :raises ProtocolError: for unknown fields or malformed values.
+    """
     if cmd == CMD_SESSIONS_CREATE:
         _reject_unknown_fields(payload, _SESSIONS_CREATE_FIELDS)
         return SessionsCreateCommand(
@@ -177,6 +284,28 @@ def parse_request(payload: Any) -> Command:
     if cmd == CMD_SESSIONS_LIST:
         _reject_unknown_fields(payload, _SESSIONS_LIST_FIELDS)
         return SessionsListCommand()
+    if cmd == CMD_BROWSER_OPEN:
+        _reject_unknown_fields(payload, _BROWSER_OPEN_FIELDS)
+        return BrowserOpenCommand(
+            url=_parse_url(payload.get("url")),
+            timeout_ms=_parse_timeout(payload.get("maxTimeout")),
+            session=_optional_session(payload.get("session")),
+            cookies=_parse_cookies(payload.get("cookies")),
+            new_tab=_parse_bool(payload.get("newTab"), "newTab"),
+            proxy=_parse_proxy(payload.get("proxy")),
+        )
+    if cmd == CMD_BROWSER_CLOSE:
+        _reject_unknown_fields(payload, _BROWSER_CLOSE_FIELDS)
+        return BrowserCloseCommand(tab=_optional_tab(payload.get("tab")))
+    if cmd == CMD_BROWSER_LIST:
+        _reject_unknown_fields(payload, _BROWSER_LIST_FIELDS)
+        return BrowserListCommand(tab=_optional_tab(payload.get("tab")))
+    if cmd == CMD_COOKIES_LIST:
+        _reject_unknown_fields(payload, _COOKIES_LIST_FIELDS)
+        return CookiesListCommand(
+            url=_optional_url(payload.get("url")),
+            proxy=_parse_proxy(payload.get("proxy")),
+        )
     _reject_unknown_fields(payload, _SESSIONS_DESTROY_FIELDS)
     return SessionsDestroyCommand(session=_required_session(payload.get("session")))
 
@@ -212,7 +341,7 @@ def _parse_fetch(payload: dict[str, Any], cmd: str) -> FetchCommand:
         cookies=cookies,
         post_data=post_data,
         return_only_cookies=_parse_bool(payload.get("returnOnlyCookies"), "returnOnlyCookies"),
-        proxy_url=_parse_proxy(payload.get("proxy")),
+        proxy=_parse_proxy(payload.get("proxy")),
     )
 
 
@@ -239,6 +368,16 @@ def _parse_url(value: Any) -> str:
         msg = "url must not embed credentials"
         raise ProtocolError(msg, http_status=400)
     return url
+
+
+def _optional_url(value: Any) -> str | None:
+    """Validate a url that scopes a reply rather than addressing one.
+
+    :raises ProtocolError: when a value is given but is not an http or https url.
+    """
+    if value is None:
+        return None
+    return _parse_url(value)
 
 
 def _parse_bool(value: Any, field_name: str) -> bool:
@@ -309,25 +448,42 @@ def _parse_post_data(value: Any, cmd: str) -> str | None:
     return None
 
 
-def _parse_proxy(value: Any) -> str | None:
+def _parse_proxy(value: Any) -> ProxySelection | None:
+    """Parse the ``proxy`` field into a configured url or a configured name.
+
+    :raises ProtocolError: when the field is malformed, names both a url and a
+        name, or carries a proxy URL that policy rejects.
+    """
     if value is None:
         return None
     if not isinstance(value, dict):
-        msg = "proxy must be an object with a url"
+        msg = "proxy must be an object with a url or a name"
         raise ProtocolError(msg, http_status=400)
-    unknown = sorted(key for key in value if key != "url")
+    unknown = sorted(key for key in value if key not in _PROXY_FIELDS)
     if unknown:
-        msg = "proxy only supports the url field"
+        msg = "proxy only supports the url and name fields"
         raise ProtocolError(msg, http_status=400)
+    name = value.get("name")
     url = value.get("url")
+    if name is not None and url is not None:
+        msg = "proxy must name either a url or an egress name, not both"
+        raise ProtocolError(msg, http_status=400)
+    if name is not None:
+        if not isinstance(name, str) or not name.strip():
+            msg = "proxy.name must be a non-empty string"
+            raise ProtocolError(msg, http_status=400)
+        return ProxySelection(name=name.strip())
+    if url is None:
+        msg = "proxy must name either a url or an egress name"
+        raise ProtocolError(msg, http_status=400)
     if not isinstance(url, str) or not url.strip():
         msg = "proxy.url must be a non-empty string"
         raise ProtocolError(msg, http_status=400)
-    url = url.strip()
-    error = _classify_proxy_url(url)
+    clean_url = url.strip()
+    error = _classify_proxy_url(clean_url)
     if error is not None:
         raise ProtocolError(error, http_status=400)
-    return url
+    return ProxySelection(url=clean_url)
 
 
 def _classify_proxy_url(url: str) -> str | None:
@@ -430,6 +586,46 @@ def _required_session(value: Any) -> str:
         msg = "missing required field: session"
         raise ProtocolError(msg, http_status=400)
     return session
+
+
+def _optional_tab(value: Any) -> str | None:
+    """Validate a tab id, which is generated by the service and echoed back by the caller."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        msg = "tab must be a non-empty string"
+        raise ProtocolError(msg, http_status=400)
+    tab = value.strip()
+    if len(tab) > MAX_TAB_ID_LENGTH:
+        msg = f"tab must be at most {MAX_TAB_ID_LENGTH} characters"
+        raise ProtocolError(msg, http_status=400)
+    if not _SESSION_ID_RE.match(tab):
+        msg = "tab may only contain letters, digits, '.', '_', ':', or '-'"
+        raise ProtocolError(msg, http_status=400)
+    return tab
+
+
+def tab_payload(tab: Any) -> dict[str, Any]:
+    """Build the caller-visible description of an interactive tab.
+
+    Only the identity and location of the tab are reported. The egress it leaves through is
+    deliberately omitted, so a response can never disclose a proxy url or its credentials.
+    """
+    return {
+        "id": tab.tab_id,
+        "url": tab.url,
+        "title": tab.title,
+        "status": tab.status_code if isinstance(tab.status_code, int) else 0,
+    }
+
+
+def cookies_payload(cookies: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the ``cookies.list`` reply fragment in the shape the fetch replies use.
+
+    Each cookie keeps the exact object a fetch reports in ``solution.cookies``, so a client
+    reads one cookie shape whether it fetched a page or asked for the profile's cookies.
+    """
+    return {"cookies": [dict(cookie) for cookie in cookies]}
 
 
 def solution_payload(  # noqa: PLR0913
