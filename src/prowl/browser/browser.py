@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Self
 
 from loguru import logger
@@ -162,7 +163,12 @@ class Browser:
             raise BrowserStartError(msg)
 
         try:
-            instance = await cls._runtime.create_tab_group(TabGroup, cls.start, cls.is_running)
+            # The group has to belong to the class that created it. A tab group resolves its
+            # tabs through its owner, so a group made through an egress browser subclass must
+            # bind to that subclass, or its tabs are looked up in the default browser's runtime
+            # where they do not exist.
+            group_factory = partial(TabGroup, owner=cls)
+            instance = await cls._runtime.create_tab_group(group_factory, cls.start, cls.is_running)
         except Exception as e:
             msg = f"Failed to start the browser due to {e}"
             raise BrowserStartError(msg) from e
@@ -171,8 +177,8 @@ class Browser:
 
     @classmethod
     async def _create_from_running(cls: type[Self]) -> TabGroup:
-        """Create a tab group in the running browser."""
-        return await cls._runtime.create_group(TabGroup)
+        """Create a tab group in the running browser, bound to *cls* as its owner."""
+        return await cls._runtime.create_group(partial(TabGroup, owner=cls))
 
     @classmethod
     async def _new_page(cls: type[Self]) -> tuple[str, PWPage]:
@@ -254,18 +260,21 @@ class Browser:
 class TabGroup:
     """Instance-level tab group.
 
-    Represents a group of tabs (1 parent + n children) within the shared browser process.
-    Created via Browser.create(). Holds per-group state and delegates to Browser classmethods
-    for browser-level operations.
+    Represents a group of tabs (1 parent + n children) within one browser process.
+    Created via ``owner.create()``. Holds per-group state and delegates to its
+    owner, which is :class:`Browser` for the process-wide egress and an egress
+    subclass of it for a named egress, so a group always belongs to exactly one
+    browser process.
     """
 
-    def __init__(self: Self, target_id: str, gid: int) -> None:
+    def __init__(self: Self, target_id: str, gid: int, owner: type[Browser] | None = None) -> None:
         """Initialize tab group with a parent tab.
 
-        Private constructor. Always use Browser.create() to instantiate.
+        Private constructor. Always use ``owner.create()`` to instantiate.
         """
         self.gid: int = gid
         self.target_id: str = target_id
+        self._owner: type[Browser] = owner if owner is not None else Browser
         self.child_target_ids: list[str] = []
         self._lock: asyncio.Lock = asyncio.Lock()
         self._quitting: bool = False
@@ -275,25 +284,25 @@ class TabGroup:
         return f"<TabGroup #{self.gid} ({len(self.child_target_ids)} children)>"
 
     def pd(self: Self) -> Chrome:
-        """Delegates to Browser.pd()."""
-        return Browser.pd()
+        """Delegates to the owning browser's pd()."""
+        return self._owner.pd()
 
     @property
     def fp(self: Self) -> FingerprintManager:
         """Delegates to Browser lifecycle fingerprint state."""
-        fp = Browser._lifecycle.fingerprint  # noqa: SLF001
+        fp = self._owner._lifecycle.fingerprint  # noqa: SLF001
         if fp is None:
-            msg = "Browser fingerprint is not configured - call Browser.start() first."
+            msg = "Browser fingerprint is not configured - call start() first."
             raise BrowserError(msg)
         return fp
 
     async def new_tab(self: Self) -> PDTab:
         """Spawns a dependent sub-tab and links it to this tab group."""
-        target_id, page = await Browser._new_page()  # noqa: SLF001
-        Browser._runtime.attach_page_to_group(page, self)  # noqa: SLF001
+        target_id, page = await self._owner._new_page()  # noqa: SLF001
+        self._owner._runtime.attach_page_to_group(page, self)  # noqa: SLF001
         async with self._lock:
             self.child_target_ids.append(target_id)
-        tab = await Browser.get_pd_tab(target_id)
+        tab = await self._owner.get_pd_tab(target_id)
         if tab is None:
             msg = f"Failed to resolve newly created tab {target_id} in group #{self.gid}."
             raise BrowserTabError(msg)
@@ -302,7 +311,7 @@ class TabGroup:
     @property
     def ppage(self: Self) -> PWPage:
         """Access to the parent Playwright Page for this group."""
-        page = Browser._runtime.target_to_page_map.get(self.target_id)  # noqa: SLF001
+        page = self._owner._runtime.target_to_page_map.get(self.target_id)  # noqa: SLF001
         if page is None:
             msg = f"Parent page {self.target_id} in group #{self.gid} is no longer available."
             raise BrowserTabError(msg)
@@ -311,7 +320,7 @@ class TabGroup:
     @property
     async def ptab(self: Self) -> PDTab:
         """Access to the parent Pydoll Tab for this group."""
-        tab = await Browser.get_pd_tab(self.target_id)
+        tab = await self._owner.get_pd_tab(self.target_id)
         if tab is None:
             msg = f"Parent tab {self.target_id} in group #{self.gid} is no longer available."
             raise BrowserTabError(msg)
@@ -324,8 +333,8 @@ class TabGroup:
         via :meth:`quit`. Child tabs are closed individually and removed
         from the child list.
         """
-        await Browser._runtime.close_group_target(self, target_id)  # noqa: SLF001
+        await self._owner._runtime.close_group_target(self, target_id)  # noqa: SLF001
 
     async def quit(self: Self) -> None:
         """Tears down all pages linked to this tab group and returns the pool slot."""
-        await Browser._runtime.close_group(self)  # noqa: SLF001
+        await self._owner._runtime.close_group(self)  # noqa: SLF001

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Self, TypedDict, cast
@@ -9,10 +10,11 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from prowl.browser.browser import Browser
+from prowl.browser.config import WINDOW_SIZE_ENV, BrowserConfig, default_window_size
 from prowl.browser.driver import BrowserRuntimeState, DriverRemoteAttachConfig, DriverStartupConfig
 from prowl.browser.exceptions import BrowserStartError
 from prowl.browser.lifecycle import BrowserLifecycle
-from prowl.browser.lifecycle.startup import get_free_port
+from prowl.browser.lifecycle.startup import clear_stale_singleton_files, get_free_port
 
 # ruff: noqa: S108
 
@@ -99,8 +101,23 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         self.assertEqual(request.cdp_port, 9999)
         self.assertEqual(request.viewport, {"width": 1920, "height": 980})
         self.assertEqual(request.locale, "en-US,en")
-        self.assertEqual(request.launch_arguments, ["--remote-debugging-port=9999", "--window-size=1920,980"])
+        self.assertEqual(
+            request.launch_arguments,
+            ["--remote-debugging-port=9999", "--window-size=1920,980", "--window-position=0,0"],
+        )
         self.assertFalse(hasattr(request, "ws_url"))
+
+    async def test_input_variation_configured_window_size_replaces_the_fingerprint_size(self) -> None:
+        """A configured window size replaces the fingerprint size, which is a persona value."""
+        self.lifecycle.apply_config(BrowserConfig(window_size=(1590, 860)), is_running=lambda: False)
+
+        result = await self._start()
+        request = cast("DriverStartupConfig", result["request"])
+
+        self.assertEqual(
+            request.launch_arguments,
+            ["--remote-debugging-port=9999", "--window-size=1590,860", "--window-position=0,0"],
+        )
 
     async def test_invariant_websocket_resolution_is_not_done_by_lifecycle(self) -> None:
         """Invariant: lifecycle must let runtime resolve CDP after launching Chrome."""
@@ -215,6 +232,43 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         self.assertEqual(request.ws_url, "wss://cloud.example/devtools/browser/remote")
         self.assertEqual(events, ["signal_cleanup"])
 
+    async def test_state_transition_start_clears_a_stale_profile_claim_before_launching(self) -> None:
+        """State transition: a stale claim is cleared before the profile is primed or launched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp)
+            lock = profile / "SingletonLock"
+            lock.symlink_to("another-container-4242")
+            (profile / "SingletonSocket").write_text("socket", encoding="utf-8")
+            events: list[str] = []
+
+            def _record_claim(directory: str) -> list[str]:
+                events.append("claim")
+                return clear_stale_singleton_files(directory)
+
+            with (
+                patch.object(BrowserLifecycle, "unpack_profile", side_effect=lambda: events.append("unpack")),
+                patch.object(BrowserLifecycle, "webdata_path", return_value=Path("/tmp/missing-web-data")),
+                patch.object(
+                    BrowserLifecycle,
+                    "_prime_profile",
+                    AsyncMock(side_effect=lambda _args: events.append("prime")),
+                ),
+                patch.object(BrowserLifecycle, "_inject_search_engine", side_effect=lambda: events.append("search")),
+                patch("prowl.browser.lifecycle.startup.ensure_binary", side_effect=lambda: events.append("binary")),
+                patch("prowl.browser.lifecycle.startup.get_free_port", return_value=9999),
+                patch("prowl.browser.lifecycle.startup.FingerprintManager", return_value=_fingerprint()),
+                patch.object(BrowserLifecycle, "_register_atexit", side_effect=lambda: events.append("atexit")),
+                patch(
+                    "prowl.browser.lifecycle.startup.clear_stale_singleton_files",
+                    side_effect=_record_claim,
+                ),
+            ):
+                self.lifecycle.profile_dir = str(profile)
+                await self.lifecycle.start(is_running=lambda: False, popup_handler=_noop_popup_handler)
+
+            self.assertFalse(lock.exists() or lock.is_symlink())
+            self.assertLess(events.index("claim"), events.index("prime"))
+
 
 class BrowserLifecycleProfileTests(TestCase):
     """Profile persistence and free-port boundaries."""
@@ -243,3 +297,30 @@ class BrowserLifecycleProfileTests(TestCase):
         port = get_free_port(0)
 
         self.assertGreater(port, 0)
+
+
+class BrowserWindowSizeTests(TestCase):
+    """The launch window size is deployment configuration, so it is parsed once and validated."""
+
+    def test_default_is_unset(self) -> None:
+        """Default: no configured size, so the fingerprint screen size is used."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(WINDOW_SIZE_ENV, None)
+            self.assertIsNone(default_window_size())
+
+    def test_parses_width_by_height(self) -> None:
+        """A configured size is parsed into pixels."""
+        with patch.dict(os.environ, {WINDOW_SIZE_ENV: " 1600x900 "}):
+            self.assertEqual(default_window_size(), (1600, 900))
+
+    def test_rejects_a_malformed_size(self) -> None:
+        """A value that is not WIDTHxHEIGHT fails loudly instead of launching at a wrong size."""
+        for raw in ("1600", "1600x", "x900", "widexhigh", "1600x900x2"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {WINDOW_SIZE_ENV: raw}), self.assertRaises(ValueError):
+                default_window_size()
+
+    def test_rejects_non_positive_pixels(self) -> None:
+        """Zero or negative pixels are refused."""
+        for raw in ("0x900", "1600x0"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {WINDOW_SIZE_ENV: raw}), self.assertRaises(ValueError):
+                default_window_size()
