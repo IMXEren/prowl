@@ -5,4 +5,4 @@ The release pipeline rewrites the assignment below from semantic-release's
 artifacts and the committed metadata always agree with the released tag.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0-dev.1"
