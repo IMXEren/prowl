@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from prowl.browser.egress import DEFAULT_EGRESS_NAME
 from prowl.service.errors import SessionError, SessionLimitError, SessionNotFoundError
 
 if TYPE_CHECKING:
@@ -33,6 +34,7 @@ class _Entry:
 
     created_at: float
     expires_at: float | None
+    egress: str = DEFAULT_EGRESS_NAME
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active: int = 0
     destroying: bool = False
@@ -47,13 +49,22 @@ class SessionRegistry:
         self._entries: dict[str, _Entry] = {}
         self._lock = asyncio.Lock()
 
-    async def ensure(self, session_id: str, ttl_minutes: int | None) -> None:
+    async def ensure(
+        self,
+        session_id: str,
+        ttl_minutes: int | None,
+        *,
+        egress: str = DEFAULT_EGRESS_NAME,
+    ) -> None:
         """Create *session_id* if absent, refresh its TTL otherwise.
 
         Waits out a concurrent destroy so a re-created session cannot overlap
-        the older lease for the same id.
+        the older lease for the same id. A session is bound to the egress of its
+        first use, because serializing it only means something within one browser
+        process.
 
         :raises SessionLimitError: when a new session would exceed the cap.
+        :raises SessionError: when the session is already bound to another egress.
         """
         while True:
             async with self._lock:
@@ -61,16 +72,29 @@ class SessionRegistry:
                 self._purge_expired(now)
                 entry = self._entries.get(session_id)
                 if entry is not None and not entry.destroying:
+                    if entry.egress != egress:
+                        msg = f"session {session_id} is bound to a different egress"
+                        raise SessionError(msg)
                     entry.expires_at = _deadline(now, ttl_minutes)
                     return
                 if entry is None:
                     self._admit_new()
-                    self._entries[session_id] = _Entry(created_at=now, expires_at=_deadline(now, ttl_minutes))
+                    self._entries[session_id] = _Entry(
+                        created_at=now,
+                        expires_at=_deadline(now, ttl_minutes),
+                        egress=egress,
+                    )
                     return
                 drained = entry.drained
             await drained.wait()
 
-    async def create(self, session_id: str | None, ttl_minutes: int | None) -> str:
+    async def create(
+        self,
+        session_id: str | None,
+        ttl_minutes: int | None,
+        *,
+        egress: str = DEFAULT_EGRESS_NAME,
+    ) -> str:
         """Create a named or generated session and return its id.
 
         :raises SessionError: when the named session already exists.
@@ -84,7 +108,11 @@ class SessionRegistry:
                 entry = self._entries.get(resolved)
                 if entry is None:
                     self._admit_new()
-                    self._entries[resolved] = _Entry(created_at=now, expires_at=_deadline(now, ttl_minutes))
+                    self._entries[resolved] = _Entry(
+                        created_at=now,
+                        expires_at=_deadline(now, ttl_minutes),
+                        egress=egress,
+                    )
                     return resolved
                 if not entry.destroying:
                     msg = f"session already exists: {resolved}"

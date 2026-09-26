@@ -1,3 +1,10 @@
+## [1.2.0-dev.1](https://github.com/IMXEren/prowl/compare/v1.1.0...v1.2.0-dev.1) (2026-09-26)
+
+### New Features
+
+* **browser:** isolate named egresses and configure launches ([bfb83d5](https://github.com/IMXEren/prowl/commit/bfb83d58b81791ca3992b79f1b83b9da138a3a7b))
+* **service:** support named egresses and interactive browser sessions ([886c203](https://github.com/IMXEren/prowl/commit/886c203e40f6685b8aa3946708f26e1f168ab3d4))
+
 ## [1.1.0](https://github.com/IMXEren/prowl/compare/v1.0.0...v1.1.0) (2026-09-23)
 
 ### Bug Fixes

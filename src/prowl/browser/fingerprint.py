@@ -25,6 +25,18 @@ class FingerprintManager:
         self.options.add_argument(f"--remote-debugging-port={port}")
 
         screen = self.profile["screen"]
+
+        # The patched build renders the page at the fingerprint screen width, not at the window
+        # width, so a window smaller than the screen clips the layout: the window can be resized
+        # to fit a display while the page inside it still lays out for the larger screen. When a
+        # window size is configured, the screen follows it, so the persona, the window and the
+        # display agree and the page fits. Unset leaves the persona untouched.
+        from prowl.browser.config import default_window_size  # noqa: PLC0415
+
+        configured = default_window_size()
+        if configured is not None:
+            screen = {"width": configured[0], "height": configured[1]}
+
         self.options.add_argument(f"--window-size={screen['width']},{screen['height']}")
         self.options.add_argument(f"--fingerprint-screen-width={screen['width']}")
         self.options.add_argument(f"--fingerprint-screen-height={screen['height']}")

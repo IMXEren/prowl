@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
+import ctypes
 import enum
 import os
 import shutil
@@ -16,14 +18,23 @@ from typing import TYPE_CHECKING, ClassVar
 from cloakbrowser import ensure_binary, launch_persistent_context_async
 from loguru import logger
 
-from prowl.browser.config import BrowserConfig, default_profile_archive, default_profile_dir
+from prowl.browser.config import (
+    BrowserConfig,
+    default_extensions_dir,
+    default_policy_dir,
+    default_profile_archive,
+    default_profile_dir,
+    default_window_size,
+)
 from prowl.browser.driver import (
     BrowserRuntimeState,
     DriverRemoteAttachConfig,
     DriverStartupConfig,
 )
 from prowl.browser.exceptions import BrowserShutdownError, BrowserStartError
+from prowl.browser.extensions import extension_launch_arguments
 from prowl.browser.fingerprint import FingerprintManager
+from prowl.browser.policies import apply_managed_policies
 from prowl.browser.profile import SearchEngineInjector
 from prowl.shutdown import CoordinatorStateError, RegistrationToken, get_coordinator
 
@@ -57,6 +68,121 @@ def get_free_port(preferred: int, fallback_range: range | None = None) -> int:
     raise RuntimeError(msg)
 
 
+#: Files Chromium writes to claim a profile directory, relative to the profile root.
+_SINGLETON_FILES: tuple[str, ...] = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return whether *pid* names a live process on this machine."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The process exists, this user may just not signal it.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Return whether *pid* exists, without terminating it the way os.kill would.
+
+    On Windows ``os.kill`` terminates the target for any signal other than the two console
+    events, so a liveness probe has to ask for a handle instead.
+    """
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    still_active = 259
+    inherit_handle = False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(process_query_limited_information, inherit_handle, pid)
+    if not handle:
+        # A process this user may not open still exists.
+        return ctypes.get_last_error() == error_access_denied
+    exit_code = ctypes.c_ulong()
+    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+        kernel32.CloseHandle(handle)
+        return False
+    kernel32.CloseHandle(handle)
+    # A finished process keeps its pid reserved while a handle to it is still held, so the exit
+    # code decides liveness here, not whether a handle could be opened at all.
+    return exit_code.value == still_active
+
+
+def _singleton_lock_owner(lock: Path) -> str | None:
+    """Return the ``host-pid`` owner recorded in *lock*, or ``None`` when there is none."""
+    try:
+        if lock.is_symlink():
+            return str(lock.readlink())
+        if lock.exists():
+            return lock.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return None
+
+
+def _singleton_owner_is_alive(owner: str) -> bool:
+    """Return whether the ``host-pid`` claim in *owner* is a process on this machine."""
+    host, separator, pid_text = owner.rpartition("-")
+    if not separator:
+        return False
+    if host != socket.gethostname():
+        # Another host wrote this claim. A container that was replaced reports the id of the
+        # container that is gone, so the process it names cannot be running here.
+        return False
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    return _pid_is_alive(pid)
+
+
+def clear_stale_singleton_files(profile_dir: str | Path) -> list[str]:
+    """Remove Chromium's profile claim when the process that wrote it is gone.
+
+    Chromium records the owning host and process in a ``SingletonLock`` and refuses to start
+    while it finds a claim it cannot disprove, so a profile left behind by a killed process, or
+    by a container that no longer exists, fails with "the profile appears to be in use by another
+    process on another computer" until the claim is cleared by hand. A claim whose owner is
+    still alive is left alone, because that really is a running browser.
+
+    :return: the names of the files that were removed.
+    """
+    profile = Path(profile_dir)
+    owner = _singleton_lock_owner(profile / "SingletonLock")
+    if owner is None or _singleton_owner_is_alive(owner):
+        return []
+
+    removed: list[str] = []
+    for name in _SINGLETON_FILES:
+        with contextlib.suppress(OSError):
+            (profile / name).unlink()
+            removed.append(name)
+    if removed:
+        logger.info(f"Cleared a stale browser profile claim: {', '.join(removed)}.")
+    return removed
+
+
+def default_viewport() -> dict[str, int]:
+    """Return the page viewport, following a configured window size when there is one.
+
+    The viewport is what the page lays out in, and it is not the same thing as the window: the window
+    can be fitted to a display while the viewport stays at the persona's size, and then the layout is
+    wider than the window with its right-hand side out of reach. A configured window size therefore
+    sets the viewport too, so the page lays out at the size that is actually shown.
+    """
+    size = default_window_size()
+    if size is not None:
+        return {"width": size[0], "height": size[1]}
+    return {"width": 1920, "height": 980}
+
+
 @dataclass(slots=True)
 class BrowserLifecycle:
     """Concrete lifecycle owner for startup and profile configuration."""
@@ -68,11 +194,17 @@ class BrowserLifecycle:
     cdp_port: int = 9222
     fingerprint: FingerprintManager | None = None
     fingerprint_options: ChromiumOptions | None = None
-    viewport: dict[str, int] = field(default_factory=lambda: {"width": 1920, "height": 980})
+    viewport: dict[str, int] = field(default_factory=default_viewport)
     locale: str = "en-US,en"
     proxy_url: str | None = field(
         default_factory=lambda: os.environ.get("PROWL_PROXY_URL", "").strip() or None,
     )
+    #: Directory of unpacked extensions every browser loads, or ``None`` for none.
+    extensions_dir: str | None = field(default_factory=default_extensions_dir)
+    #: Directory of managed policy JSON applied before every launch, or ``None``.
+    policy_dir: str | None = field(default_factory=default_policy_dir)
+    #: Window size the browser is launched with, or ``None`` for the fingerprint screen size.
+    window_size: tuple[int, int] | None = field(default_factory=default_window_size)
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _shutdown_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _shutdown_state: BrowserShutdownState = BrowserShutdownState.NOT_STARTED
@@ -110,6 +242,9 @@ class BrowserLifecycle:
         self.proxy_url = config.proxy_url
         self.profile_dir = config.profile_dir
         self.profile_archive = Path(config.profile_archive)
+        self.extensions_dir = config.extensions_dir
+        self.policy_dir = config.policy_dir
+        self.window_size = config.window_size
 
     # -- Profile helpers ------------------------------------------------------------
 
@@ -209,6 +344,9 @@ class BrowserLifecycle:
                 return
 
             self.unpack_profile()
+            # Clear a claim left by a process that is no longer running, before any launch,
+            # including the priming launch below, or that launch fails the same way.
+            clear_stale_singleton_files(self.profile_dir)
             if not self.checked_binary:
                 ensure_binary()
                 self.checked_binary = True
@@ -221,11 +359,29 @@ class BrowserLifecycle:
             }
             self.fingerprint = FingerprintManager(profile)
             self.fingerprint_options = self.fingerprint.options
+            # Chromium reads managed policy as it starts, so the files are in place first.
+            apply_managed_policies(self.policy_dir)
             launch_arguments = list(self.fingerprint.options.arguments)
+            # The window is placed at the origin and, when a size is configured, launched at that
+            # size instead of the fingerprint screen size. Either one is what stops Chromium
+            # restoring the window bounds it saved the last time this profile ran: a restored
+            # placement is honoured even when it is larger than the display, which puts the right
+            # edge and the bottom of the window out of reach, and that is what happened once the
+            # display was resized. An explicit position skips the restore, leaving the window to
+            # the window manager, which fits it to the screen.
+            if self.window_size is not None:
+                launch_arguments = [
+                    argument for argument in launch_arguments if not argument.startswith("--window-size=")
+                ]
+                launch_arguments.append(f"--window-size={self.window_size[0]},{self.window_size[1]}")
+            launch_arguments.append("--window-position=0,0")
             if self.proxy_url:
                 # One browser and one profile have exactly one egress. The URL is
                 # never logged or echoed so proxy credentials cannot leak.
                 launch_arguments.append(f"--proxy-server={self.proxy_url}")
+            # Extensions are deployment configuration, added on the one launch path so the
+            # priming launch and the live launch always agree on them.
+            launch_arguments.extend(extension_launch_arguments(self.extensions_dir))
 
             if not self.webdata_path().exists():
                 await self._prime_profile(launch_arguments)
