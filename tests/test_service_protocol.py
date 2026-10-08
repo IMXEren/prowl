@@ -556,6 +556,45 @@ class ProxyPolicyTests(IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             Service(_config(proxy_url="socks5://user:secret@127.0.0.1:1080"), FakeBackend())
 
+    async def test_operator_http_proxy_credentials_are_configured_but_never_accepted_from_caller(self) -> None:
+        configured = "https://user:secret@127.0.0.1:10001"
+        config = _config(proxy_url=configured, egresses={"other": configured})
+        service = Service(config, FakeBackend())
+        self.assertNotIn("secret", repr(config))
+        self.assertEqual(service.egresses["default"], configured)
+        self.assertEqual(service.egresses["other"], configured)
+        _, body = await service.handle(
+            {"cmd": "request.get", "url": "https://example.com/", "proxy": {"url": configured}}
+        )
+        self.assertEqual(body["status"], "error")
+        self.assertNotIn("secret", body["message"])
+        _, selected = await service.handle(
+            {"cmd": "request.get", "url": "https://example.com/", "proxy": {"name": "other"}}
+        )
+        self.assertEqual(selected["status"], "ok")
+
+    async def test_authenticated_proxy_environment_stays_operator_only(self) -> None:
+        configured = "https://user:secret@127.0.0.1:10001"
+        with patch.dict(
+            "os.environ",
+            {"PROWL_PROXY_URL": configured, "PROWL_EGRESSES": f"other={configured}"},
+        ):
+            config = ServiceConfig.from_env()
+        self.assertEqual(config.proxy_url, configured)
+        self.assertEqual(config.egresses["other"], configured)
+        self.assertNotIn("secret", repr(config))
+        self.assertNotIn("secret", repr(Service(config, FakeBackend())))
+
+    async def test_malformed_operator_authenticated_url_is_rejected_without_echo(self) -> None:
+        for url in (
+            "https://user:secret@127.0.0.1:10001/path",
+            "https://user:secret@127.0.0.1:bad",
+            "socks5://user:secret@127.0.0.1:10001",
+        ):
+            with self.subTest(url=url), self.assertRaises(ValueError) as failure:
+                Service(_config(proxy_url=url), FakeBackend())
+            self.assertNotIn("secret", str(failure.exception))
+
     def test_proxy_error_is_caller_safe(self) -> None:
         self.assertTrue(issubclass(ProxyError, Exception))
 
@@ -638,6 +677,9 @@ class SessionLeaseRaceTests(IsolatedAsyncioTestCase):
         async with registry.lease("s"):
             registry._entries["s"].expires_at = time.monotonic() - 1
             self.assertEqual(await registry.list_sessions(), ["s"])
+        # Completing the lease re-armed the idle deadline, so the session survives.
+        self.assertEqual(await registry.list_sessions(), ["s"])
+        registry._entries["s"].expires_at = time.monotonic() - 1
         self.assertEqual(await registry.list_sessions(), [])
 
     async def test_recreate_does_not_overlap_older_lease(self) -> None:

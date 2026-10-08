@@ -15,7 +15,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 from prowl.browser.config import BrowserConfig
-from prowl.browser.egress import DEFAULT_EGRESS_NAME
+from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
 from prowl.service.app import Service, ServiceConfig
 from prowl.service.backend import DEFAULT_INTERACTIVE_IDLE_SECONDS
 
@@ -443,18 +443,18 @@ class StubGroup:
 
 
 class _StubSite:
-    """Site double returning a fixed page."""
+    """PageHandler double returning a fixed page."""
 
     def __init__(self, *, fail: bool = False) -> None:
         self._fail = fail
 
     async def get(self, url: str, timeout: int, **_kwargs: Any) -> Any:
-        from prowl.browser.site import Source  # noqa: PLC0415
+        from prowl.browser.page_handler import PageResponse  # noqa: PLC0415
 
         if self._fail:
             msg = "navigation failed"
             raise RuntimeError(msg)
-        return Source(
+        return PageResponse(
             source=_PAGE,
             status_code=200,
             headers={},
@@ -541,7 +541,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
             async def shutdown(cls) -> None:
                 """No-op."""
 
-        patcher = patch("prowl.browser.egress.create_egress_browser", side_effect=_create_browser)
+        patcher = patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create_browser)
         patcher.start()
         self.addCleanup(patcher.stop)
         default_patcher = patch.object(backend_module, "Browser", FakeDefaultBrowser)
@@ -554,7 +554,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend()
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/"))).tab
         self.assertEqual(tab.title, "Example Domain")
         self.assertEqual(tab.status_code, 200)
@@ -569,7 +569,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
 
         created: list[str] = []
         backend, _groups = self._backend(created=created)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))
             await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
         # One browser was created for the egress, so the tab and the fetch share a profile.
@@ -582,7 +582,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
 
         shutdown_log: list[str] = []
         backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))).tab
         closed = await backend.close_interactive(tab.tab_id)
         self.assertEqual(closed, [tab.tab_id])
@@ -603,7 +603,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
 
         shutdown_log: list[str] = []
         backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))).tab
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, [])
@@ -617,7 +617,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
 
         shutdown_log: list[str] = []
         backend, groups = self._backend(idle_seconds=0.01, egress_idle_seconds=0.01, shutdown_log=shutdown_log)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))
         await asyncio.sleep(0.15)
         self.assertEqual(await backend.list_interactive(), [])
@@ -631,7 +631,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, _groups = self._backend(idle_seconds=0.05)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/"))).tab
         # Poll the tab the caller is displaying, as a WebView does, so its countdown restarts.
         for _ in range(4):
@@ -646,7 +646,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend(idle_seconds=0.05)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/"))
         for _ in range(4):
             await asyncio.sleep(0.02)
@@ -661,7 +661,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend(idle_seconds=0.06)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             watched = (await backend.open_interactive(InteractiveRequest(url="https://watched.example/"))).tab
             await backend.open_interactive(InteractiveRequest(url="https://forgotten.example/"))
             for _ in range(6):
@@ -678,7 +678,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend(max_concurrency=1, steal_least_recent=True)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             watched = (await backend.open_interactive(InteractiveRequest(url="https://watched.example/"))).tab
             await asyncio.sleep(0.01)
             forgotten = (await backend.open_interactive(InteractiveRequest(url="https://forgotten.example/"))).tab
@@ -699,7 +699,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import FetchRequest, InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend(idle_seconds=0.01)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/"))).tab
             await backend.fetch(None, FetchRequest(url="https://example.com/"))
         await asyncio.sleep(0.15)
@@ -716,7 +716,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, _groups = self._backend()
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/"))
         tabs = await backend.list_interactive()
         self.assertEqual(tabs[0].url, "https://example.com/from-page")
@@ -729,7 +729,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         shutdown_log: list[str] = []
         backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
         with (
-            patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite(fail=True)),
+            patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite(fail=True)),
             self.assertRaises(RuntimeError),
         ):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))
@@ -744,7 +744,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend()
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/"))
             await backend.open_interactive(InteractiveRequest(url="https://example.org/"))
         closed = await backend.close_interactive(None)
@@ -757,7 +757,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend()
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/"))
         await backend.aclose()
         self.assertEqual(groups[0].quit_calls, 1)
@@ -769,7 +769,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         from prowl.service.backend import FetchRequest, InteractiveRequest  # noqa: PLC0415
 
         backend, groups = self._backend(max_concurrency=1, steal_least_recent=True)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite()):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/"))).tab
             await backend.fetch(None, FetchRequest(url="https://example.com/"))
         self.assertEqual(groups[0].quit_calls, 0)
@@ -789,17 +789,17 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
                 self.calls = 0
 
             async def get(self, url: str, timeout: int, **_kwargs: Any) -> Any:
-                from prowl.browser.site import Source  # noqa: PLC0415
+                from prowl.browser.page_handler import PageResponse  # noqa: PLC0415
 
                 self.calls += 1
                 if self.calls == 1:
                     entered.set()
                     await release.wait()
-                return Source(source=_PAGE, status_code=200, headers={}, user_agent="Mozilla/5.0 (Test)", url=url)
+                return PageResponse(source=_PAGE, status_code=200, headers={}, user_agent="Mozilla/5.0 (Test)", url=url)
 
         site = GatedSite()
         backend, _groups = self._backend(max_concurrency=1, steal_least_recent=True)
-        with patch.object(backend_module, "resolve_site", lambda _group, _url: site):
+        with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: site):
             first = asyncio.create_task(backend.fetch(None, FetchRequest(url="https://example.com/one")))
             await asyncio.wait_for(entered.wait(), timeout=2.0)
             # One fetch is already in flight with no tab open, which is the saturated state the

@@ -19,7 +19,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 from prowl.browser.config import BrowserConfig
-from prowl.browser.egress import DEFAULT_EGRESS_NAME
+from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
 from prowl.service.app import Service, ServiceConfig
 from prowl.service.backend import (
     CookieQuery,
@@ -361,16 +361,16 @@ class StubGroup:
 
 
 class _StubSite:
-    """Site double returning a fixed page and recording the navigation."""
+    """PageHandler double returning a fixed page and recording the navigation."""
 
     def __init__(self, events: list[str]) -> None:
         self.events = events
 
     async def get(self, url: str, timeout: int, **_kwargs: Any) -> Any:
-        from prowl.browser.site import Source  # noqa: PLC0415
+        from prowl.browser.page_handler import PageResponse  # noqa: PLC0415
 
         self.events.append("navigate")
-        return Source(
+        return PageResponse(
             source=_PAGE,
             status_code=200,
             headers={},
@@ -457,7 +457,7 @@ class _BackendFixture(IsolatedAsyncioTestCase):
             def pd(cls) -> Any:
                 return reader
 
-        patcher = patch("prowl.browser.egress.create_egress_browser", side_effect=_create_browser)
+        patcher = patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create_browser)
         patcher.start()
         self.addCleanup(patcher.stop)
         default_patcher = patch.object(backend_module, "Browser", FakeDefaultBrowser)
@@ -469,7 +469,7 @@ class _BackendFixture(IsolatedAsyncioTestCase):
         """Patch site resolution so navigation is recorded rather than performed."""
         from prowl.service import backend as backend_module  # noqa: PLC0415
 
-        return patch.object(backend_module, "resolve_site", lambda _group, _url: _StubSite(events))
+        return patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite(events))
 
 
 class CookieBackendTests(_BackendFixture):

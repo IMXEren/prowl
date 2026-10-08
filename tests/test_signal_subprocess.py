@@ -199,7 +199,7 @@ def test_callable_prior_runs_after_signal(children: list[Any]) -> None:
 
 
 def test_second_signal_during_active_event_is_idempotent(children: list[Any]) -> None:
-    """Second signal during drain is idempotent — process survives."""
+    """Second signal during drain is idempotent - process survives."""
     process, connection = _start_child("ignore", second_signal_case=True)
     children.append(process)
     pid = _expect(connection, "handler-ready")

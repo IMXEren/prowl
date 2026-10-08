@@ -14,7 +14,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 from prowl.browser.config import BrowserConfig
-from prowl.browser.egress import (
+from prowl.browser.proxy.egress import (
     DEFAULT_EGRESS_NAME,
     EgressError,
     EgressPool,
@@ -23,7 +23,14 @@ from prowl.browser.egress import (
     parse_egress_spec,
 )
 from prowl.service.app import Service, ServiceConfig
-from prowl.service.backend import FetchRequest, FetchResult
+from prowl.service.backend import (
+    CookieQuery,
+    FetchRequest,
+    FetchResult,
+    InteractiveOpenResult,
+    InteractiveRequest,
+    InteractiveTab,
+)
 
 _EGRESS_URL = "socks5://127.0.0.1:10001"
 _OTHER_URL = "socks5://127.0.0.1:10002"
@@ -64,6 +71,18 @@ class FakeBackend:
             return self.result()
         finally:
             self.active -= 1
+
+    async def open_interactive(self, request: InteractiveRequest) -> InteractiveOpenResult:
+        raise NotImplementedError
+
+    async def close_interactive(self, tab_id: str | None) -> list[str]:
+        raise NotImplementedError
+
+    async def list_interactive(self, tab_id: str | None = None) -> list[InteractiveTab]:
+        raise NotImplementedError
+
+    async def list_cookies(self, query: CookieQuery) -> list[dict[str, Any]]:
+        raise NotImplementedError
 
     async def aclose(self) -> None:
         """No-op for the double."""
@@ -136,7 +155,7 @@ class EgressPathTests(TestCase):
 
     def test_named_egress_derives_both_paths(self) -> None:
         directory, archive = derive_egress_paths("/state/profile", "/state/browser-profile.zip", "decodo")
-        self.assertEqual(Path(directory), Path("/state/profile/decodo"))
+        self.assertEqual(Path(directory), Path("/state/profile-decodo"))
         self.assertEqual(Path(archive), Path("/state/browser-profile-decodo.zip"))
 
     def test_named_egress_paths_are_distinct_per_name(self) -> None:
@@ -254,7 +273,7 @@ class EgressPoolTests(IsolatedAsyncioTestCase):
             {"a": _EGRESS_URL, "b": _OTHER_URL},
             idle_seconds=idle_seconds,
         )
-        patcher = patch("prowl.browser.egress.create_egress_browser", side_effect=_create)
+        patcher = patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create)
         patcher.start()
         self.addCleanup(patcher.stop)
         return pool, stubs
@@ -386,8 +405,8 @@ class EgressPoolTests(IsolatedAsyncioTestCase):
         await pool.release("a")
         await pool.aclose()
 
-    async def test_aclose_completes_while_a_shutdown_is_in_flight(self) -> None:
-        """Closing the pool does not wait for a shutdown that is already running."""
+    async def test_aclose_drains_a_shutdown_already_in_flight(self) -> None:
+        """Closing the pool retains ownership until the pending native close completes."""
         gate = asyncio.Event()
         pool, stubs = self._pool(idle_seconds=0.01, shutdown_gate=gate)
         await pool.acquire("a")
@@ -397,10 +416,14 @@ class EgressPoolTests(IsolatedAsyncioTestCase):
         # profile it is still using.
         self.assertEqual(pool.live_names(), ("a",))
 
-        await asyncio.wait_for(pool.aclose(), timeout=2.0)
-        self.assertEqual(pool.live_names(), ())
+        closer = asyncio.create_task(pool.aclose())
+        await _settle()
+        self.assertFalse(closer.done())
+        self.assertEqual(pool.live_names(), ("a",))
 
         gate.set()
+        await asyncio.wait_for(closer, timeout=2.0)
+        self.assertEqual(pool.live_names(), ())
         await _wait_for_shutdown(stubs["a"])
         self.assertEqual(stubs["a"].shutdown_calls, 1)
 
@@ -637,7 +660,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
         backend = backend_module.BrowserBackend(egresses={"decodo": _EGRESS_URL})
         with (
             patch.object(backend_module, "Browser", FakeBrowser),
-            patch.object(backend_module, "resolve_site", lambda _group, _url: _FakeSite()),
+            patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _FakeSite()),
         ):
             await backend.fetch(None, FetchRequest(url="https://example.com/"))
         self.assertEqual(calls, ["start", "create"])
@@ -668,8 +691,8 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
 
         backend = backend_module.BrowserBackend(egresses={"decodo": _EGRESS_URL}, egress_idle_seconds=60.0)
         with (
-            patch("prowl.browser.egress.create_egress_browser", side_effect=_create),
-            patch.object(backend_module, "resolve_site", lambda _group, _url: _FakeSite()),
+            patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create),
+            patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _FakeSite()),
         ):
             await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
             await backend.aclose()
@@ -710,7 +733,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
 
         backend = backend_module.BrowserBackend(egresses={"decodo": _EGRESS_URL}, egress_idle_seconds=0.01)
         with (
-            patch("prowl.browser.egress.create_egress_browser", side_effect=_create),
+            patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create),
             self.assertRaises(RuntimeError),
         ):
             await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
@@ -745,7 +768,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
 
         backend = backend_module.BrowserBackend(egresses={"decodo": _EGRESS_URL}, egress_idle_seconds=0.01)
         with (
-            patch("prowl.browser.egress.create_egress_browser", side_effect=_create),
+            patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create),
             self.assertRaises(RuntimeError),
         ):
             await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
@@ -781,7 +804,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
             return FakeEgressBrowser
 
         backend = backend_module.BrowserBackend(egresses={"decodo": _EGRESS_URL}, egress_idle_seconds=0.01)
-        with patch("prowl.browser.egress.create_egress_browser", side_effect=_create):
+        with patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create):
             task = asyncio.create_task(
                 backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo")),
             )
@@ -833,9 +856,9 @@ class _FakeSite:
     """Minimal site double returning a fixed source."""
 
     async def get(self, url: str, timeout: int, **_kwargs: Any) -> Any:
-        from prowl.browser.site import Source  # noqa: PLC0415
+        from prowl.browser.page_handler import PageResponse  # noqa: PLC0415
 
-        return Source(
+        return PageResponse(
             source="<html></html>",
             status_code=200,
             headers={},

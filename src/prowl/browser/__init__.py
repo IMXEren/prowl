@@ -3,7 +3,22 @@
 from prowl.browser.browser import Browser, TabGroup
 from prowl.browser.config import BrowserConfig
 from prowl.browser.cookies import Cookies
-from prowl.browser.egress import (
+from prowl.browser.driver import BrowserContextHandle
+from prowl.browser.extensions import (
+    EXTENSIONS_DIR_ENV,
+    Extension,
+    discover_extensions,
+    extension_launch_arguments,
+)
+from prowl.browser.page_handler import PageHandler, PageResponse
+from prowl.browser.policies import (
+    MANAGED_POLICY_DIRS,
+    POLICY_DIR_ENV,
+    PolicyFile,
+    apply_managed_policies,
+    policy_files,
+)
+from prowl.browser.proxy.egress import (
     DEFAULT_EGRESS_IDLE_SECONDS,
     DEFAULT_EGRESS_NAME,
     EGRESS_IDLE_SECONDS_ENV,
@@ -14,20 +29,6 @@ from prowl.browser.egress import (
     derive_egress_paths,
     parse_egress_spec,
 )
-from prowl.browser.extensions import (
-    EXTENSIONS_DIR_ENV,
-    Extension,
-    discover_extensions,
-    extension_launch_arguments,
-)
-from prowl.browser.policies import (
-    MANAGED_POLICY_DIRS,
-    POLICY_DIR_ENV,
-    PolicyFile,
-    apply_managed_policies,
-    policy_files,
-)
-from prowl.browser.site import Site, Source
 
 __all__ = [
     "DEFAULT_EGRESS_IDLE_SECONDS",
@@ -39,13 +40,14 @@ __all__ = [
     "POLICY_DIR_ENV",
     "Browser",
     "BrowserConfig",
+    "BrowserContextHandle",
     "Cookies",
     "EgressError",
     "EgressPool",
     "Extension",
+    "PageHandler",
+    "PageResponse",
     "PolicyFile",
-    "Site",
-    "Source",
     "TabGroup",
     "apply_managed_policies",
     "create_egress_browser",
