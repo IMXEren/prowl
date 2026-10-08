@@ -20,9 +20,9 @@ from loguru import logger
 
 from prowl.browser.config import BrowserConfig
 from prowl.browser.driver import BrowserRuntimeState, DriverStartupConfig
-from prowl.browser.egress import create_egress_browser
 from prowl.browser.extensions import Extension, discover_extensions, extension_launch_arguments
 from prowl.browser.lifecycle import BrowserLifecycle
+from prowl.browser.proxy.egress import create_egress_browser
 
 # ruff: noqa: S108
 

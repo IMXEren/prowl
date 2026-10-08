@@ -1,0 +1,1112 @@
+"""Methods for fetching the site and source."""
+
+import asyncio
+import atexit
+import base64
+import contextlib
+import json
+import time
+from typing import TYPE_CHECKING, Any, Self, cast
+from urllib.parse import parse_qsl, urljoin, urlsplit
+
+from loguru import logger
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+from pydoll.browser.tab import Tab
+from pydoll.commands.dom_commands import DomCommands
+from pydoll.commands.fetch_commands import FetchCommands
+from pydoll.commands.runtime_commands import RuntimeCommands
+from pydoll.commands.target_commands import TargetCommands
+from pydoll.protocol.dom.types import Node as PDNode
+from pydoll.protocol.fetch.events import FetchEvent
+from pydoll.protocol.fetch.types import RequestStage
+from requests.structures import CaseInsensitiveDict
+from turbohtml import Element, Html, Node, Text
+from turbohtml import parse as tb_parse
+
+from prowl.browser.browser import Browser, TabGroup
+from prowl.browser.cookies import Cookie, Cookies
+from prowl.browser.exceptions import JSONExtractError, PageLoadError
+from prowl.browser.headers import HEADER_SCOPE_DOCUMENT, HEADER_SCOPES, normalize_custom_headers
+from prowl.browser.solvers import ChallengeSolver, CloudflareSolver, click_embedded_turnstile, solve_visible_captcha
+from prowl.browser.utils import run_coroutine_sync
+from prowl.shutdown import get_process_cancel_token
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Mapping
+
+    from playwright.async_api import JSHandle, Page, Route
+
+
+def _add_doctype_header(html: str) -> str:
+    """Prepend the HTML5 doctype declaration to an HTML string."""
+    return f"<!DOCTYPE html>\n{html}"
+
+
+class PageResponse:
+    """Rendered browser page content with its response metadata."""
+
+    def __init__(  # noqa: PLR0913, PLR0917
+        self: Self,
+        source: str,
+        status_code: str | int | None = None,
+        headers: dict[str, str] | CaseInsensitiveDict | None = None,  # type: ignore[type-arg]
+        user_agent: str | None = None,
+        url: str | None = None,
+        screenshot: str | None = None,
+        turnstile_token: str | None = None,
+        captcha_provider: str | None = None,
+        captcha_token: str | None = None,
+    ) -> None:
+        self.__default__()
+        self._text = source
+        self.status_code: int | None = None
+        if isinstance(status_code, int):
+            self.status_code = status_code
+        elif isinstance(status_code, str):
+            with contextlib.suppress(Exception):
+                self.status_code = int(status_code)
+        if isinstance(headers, dict | CaseInsensitiveDict):
+            self.headers.update(headers)
+        self.user_agent = user_agent
+        self.url = url
+        self.screenshot = screenshot
+        self.turnstile_token = turnstile_token
+        self.captcha_provider = captcha_provider
+        self.captcha_token = captcha_token
+
+    def __default__(self: Self) -> None:
+        """Set attributes to default non-None values."""
+        self.headers: CaseInsensitiveDict = CaseInsensitiveDict()  # type: ignore[type-arg]
+
+    @property
+    def text(self: Self) -> str:
+        """Returns the html content of the page."""
+        return self._text
+
+    def json(self: Self, **kwargs: Any) -> Any:
+        r"""Returns the json-encoded content of a response, if any.
+
+        :param \*\*kwargs: Optional arguments that ``json.loads`` takes.
+        :raises JSONDecodeError: If the response body does not
+            contain valid json.
+        :raises JSONExtractError: If the json extraction impl
+            fails or no such json.
+
+        The idea is basically that if the content view shows raw json,
+        then it's possible to extract it. As done using `requests` package,
+        i.e. if this fails with `JSONExtractError` then most likely `requests`
+        would also fail for the same.
+        """
+        doc = tb_parse(self.text)
+        data = doc.select_one("body > pre")
+        if not data:
+            msg = "the json extractor implementation failed"
+            raise JSONExtractError(msg)
+        return json.loads(data.text, **kwargs)
+
+
+_MEDIA_RESOURCE_TYPES: frozenset[str] = frozenset({"image", "stylesheet", "font"})
+
+_TURNSTILE_INPUT_SELECTOR: str = "input[name='cf-turnstile-response']"
+_TURNSTILE_RETRY_TIMEOUT_MS: int = 2000
+_TURNSTILE_ANCHOR_EXPRESSION: str = (
+    "() => {"
+    " const anchor = document.createElement('button');"
+    " anchor.type = 'button';"
+    " document.body.prepend(anchor);"
+    " return anchor;"
+    " }"
+)
+
+
+class PageHandler:
+    """Convenient default class to load any site."""
+
+    NOT_FOUND_STATUS_CODE: int = 404
+
+    def __init__(self: Self, tg: TabGroup) -> None:
+        self._tg = tg
+        self._loaded = asyncio.Event()
+        self.challenge_solver: ChallengeSolver = CloudflareSolver()
+        self._active_solver: tuple[ChallengeSolver, Tab] | None = None
+        self._reset()
+
+    def _reset(self: Self) -> None:
+        if self._active_solver is not None:
+            msg = "an active challenge solver still owns its tab"
+            raise PageLoadError(msg)
+        self.status_code: int | str | None = None
+        self.response_found: bool = False
+        self.response_headers: CaseInsensitiveDict | None = None  # type: ignore[type-arg]
+        self.redirected_url: str | None = None
+        self.cf_encountered: bool = False
+        self.cf_encountered_on_url: str | None = None
+        self.cf_auto_solve_enabled: bool = False
+        self.user_agent: str | None = None
+        self._on_request_callback_id: int | None = None
+        self._header_route_matcher: Any = None
+        self._header_route_handler: Any = None
+        self._loaded.clear()
+        self.cleanup_done: bool = False
+
+    def get_time_left(self: Self) -> float:
+        """Get the left time before timeout."""
+        elapsed = time.perf_counter() - self.start
+        return max(0, self.timeout - elapsed)
+
+    async def _new_tab(self: Self) -> Tab:
+        """Returns a new tab in the current browser group."""
+        return await self._tg.new_tab()
+
+    async def get(  # noqa: PLR0913
+        self: Self,
+        url: str,
+        timeout: int,  # noqa: ASYNC109
+        *,
+        headers: dict[str, str] | None = None,
+        header_scope: str | None = None,
+        tabs_till_verify: int | None = None,
+        solve_captcha: bool = False,
+    ) -> PageResponse:
+        """Load *url*, optionally adding validated headers within a narrow scope.
+
+        With no caller headers, the browser owns every request header. A
+        ``document`` scope modifies only the initial main-frame navigation. An
+        ``origin`` scope modifies requests whose scheme, host, and effective
+        port exactly match *url*. Redirects and third-party subresources never
+        inherit scoped headers. When *tabs_till_verify* is set, the loaded page
+        is verified through the owned native solver before keyboard fallback,
+        and the token and live page URL are attached when available. When
+        *solve_captcha* is set, one recognized local widget is attempted after
+        the page is ready and its fresh provider
+        token is attached when available. Raises :class:`PageLoadError` on failure.
+        """
+        self._reset()
+        self.url = url
+        self.timeout = timeout
+        logger.info(f"Non-exclusive impl to fetch page for url -> {self.url} : Fetching with default config...")
+        try:
+            self.start = time.perf_counter()
+            self.tab = await self._tg.ptab
+            if headers:
+                await self._install_scoped_headers(headers, header_scope)
+            await self._add_network_listeners()
+            await self.tab.enable_page_events()
+            if tabs_till_verify is not None:
+                await self.start_challenge_solver()
+            await self.tab.go_to(self.url, timeout=round(self.get_time_left()))
+
+            if not await self._check_if_loaded(cleanup=tabs_till_verify is None):
+                msg = f"page load check mechanism failed out for: {url}"
+                raise PageLoadError(msg)
+
+            # Wait for page to load, if any redirects
+            logger.info("Waiting for requested page to load...")
+            await asyncio.wait_for(self._wait_page_load(), timeout=self.get_time_left())
+            token: str | None = None
+            page_url: str | None = None
+            if tabs_till_verify is not None:
+                page = self._tg.ppage
+                try:
+                    token = await self.verify_turnstile(tabs_till_verify)
+                except (TimeoutError, PlaywrightTimeoutError):
+                    msg = "turnstile verification timed out"
+                    raise PageLoadError(msg) from None
+                page_url = page.url
+            captcha_provider: str | None = None
+            captcha_token: str | None = None
+            if solve_captcha:
+                solved = await solve_visible_captcha(self._tg.ppage, self.get_time_left)
+                if solved is not None:
+                    captcha_provider, captcha_token = solved
+            tree = await self.build_dom_tree()
+            self._raise_if_challenge_title(tree)
+
+            source = _add_doctype_header(tree.serialize(Html()))
+            return PageResponse(
+                source=source,
+                status_code=self.status_code,
+                headers=self.response_headers,
+                user_agent=self.user_agent,
+                url=page_url or self.redirected_url,
+                turnstile_token=token,
+                captcha_provider=captcha_provider,
+                captcha_token=captcha_token,
+            )
+        except Exception as e:
+            raise PageLoadError(e) from e
+        finally:
+            await self._cleanup()
+
+    async def post(
+        self,
+        url: str,
+        timeout: int,  # noqa: ASYNC109
+        *,
+        post_data: str = "",
+        headers: dict[str, str] | None = None,
+    ) -> PageResponse:
+        """Load *url* with a real browser-issued POST and build its :class:`PageResponse`.
+
+        The request is issued by the page's own ``fetch`` implementation, so it
+        shares the browser session's origin, cookies, TLS fingerprint, and
+        header set instead of being downgraded to a GET. The response body is
+        installed into the document before the DOM tree is built.
+        """
+        self._reset()
+        self.url = url
+        self.timeout = timeout
+        logger.info(f"Exclusive impl to POST url -> {self.url} ...")
+        try:
+            self.start = time.perf_counter()
+            await self._warm_origin_root(url)
+            self.tab = await self._tg.ptab
+            result = await self._post_via_fetch(url, post_data, headers or {})
+
+            error = result.get("error")
+            if error:
+                msg = f"browser POST failed for {url}: {error}"
+                raise PageLoadError(msg)
+
+            body = result.get("body") or ""
+            title_lower = body.lower()
+            if "<title>just a moment" in title_lower:
+                msg = "cloudflare protection (captcha verification required)"
+                raise PageLoadError(msg)
+
+            self.status_code = result.get("status")
+            self.response_headers = CaseInsensitiveDict(result.get("headers") or {})
+            self.user_agent = result.get("userAgent")
+            return PageResponse(
+                source=body,
+                status_code=self.status_code,
+                headers=self.response_headers,
+                user_agent=self.user_agent,
+                url=url,
+            )
+        except PageLoadError:
+            raise
+        except Exception as e:
+            raise PageLoadError(e) from e
+        finally:
+            await self._cleanup_post()
+
+    async def _post_via_fetch(
+        self,
+        url: str,
+        post_data: str,
+        headers: dict[str, str],
+    ) -> dict[str, Any]:
+        """Issue *url* as a POST from page context and capture its response."""
+        script = _build_post_fetch_script(url, post_data, headers)
+        result = await self.tab.execute_script(script, await_promise=True, return_by_value=True)
+        value = result.get("result", {}).get("result", {}).get("value")
+        if isinstance(value, str):
+            with contextlib.suppress(json.JSONDecodeError):
+                value = json.loads(value)
+        if not isinstance(value, dict):
+            msg = f"unexpected POST evaluation result for {url}"
+            raise PageLoadError(msg)
+        return cast("dict[str, Any]", value)
+
+    async def _cleanup_post(self) -> None:
+        """Mark the POST fetch cleaned up; page listeners belong to the warm GET."""
+        self.cleanup_done = True
+
+    @staticmethod
+    def _raise_if_challenge_title(tree: Element) -> None:
+        """Raise :class:`PageLoadError` when *tree* still shows the challenge title."""
+        title_el = tree.select_one("title")
+        if title_el and title_el.text and title_el.text.lower().startswith("just a moment"):
+            msg = "cloudflare protection (captcha verification required)"
+            raise PageLoadError(msg)
+
+    async def _verify_with_native_solver(self: Self, page: "Page", initial: list[str]) -> tuple[bool, str | None]:
+        if self._active_solver is None or not isinstance(self._active_solver[0], CloudflareSolver):
+            return False, None
+        if any(initial):
+            response = await page.evaluate(_TURNSTILE_RESPONSE_EXPRESSION)
+            if isinstance(response, str) and response and response in initial:
+                return True, response
+        if await click_embedded_turnstile(self.tab, page):
+            token = await _wait_turnstile_token(page, initial, max(1, round(self.get_time_left() * 1000)))
+            return True, token
+        return False, None
+
+    async def verify_turnstile(self: Self, tabs: int) -> str | None:
+        """Verify a fresh page token within the request deadline."""
+        async with asyncio.timeout(self.get_time_left()):
+            page = self._tg.ppage
+            widget = page.locator(_TURNSTILE_INPUT_SELECTOR)
+            if not await widget.count():
+                return None
+            initial: list[str] = await widget.evaluate_all("elements => elements.map(element => element.value)")
+            attempted, native_token = await self._verify_with_native_solver(page, initial)
+            if attempted:
+                return native_token
+            anchor: JSHandle | None = None
+            try:
+                while True:
+                    if anchor is not None:
+                        await anchor.evaluate("node => node.focus()")
+                    for _ in range(tabs):
+                        await page.keyboard.press("Tab")
+                    await page.keyboard.press("Space")
+                    try:
+                        return await _wait_turnstile_token(page, initial, _TURNSTILE_RETRY_TIMEOUT_MS)
+                    except PlaywrightTimeoutError:
+                        if anchor is None:
+                            anchor = await page.evaluate_handle(_TURNSTILE_ANCHOR_EXPRESSION)
+                        continue
+            finally:
+                if anchor is not None:
+                    try:
+                        await anchor.evaluate("node => node.remove()")
+                    finally:
+                        await anchor.dispose()
+
+    async def snapshot(
+        self: Self,
+        source: PageResponse,
+        *,
+        wait_in_seconds: float = 0.0,
+        return_screenshot: bool = False,
+        post_response: bool = False,
+    ) -> PageResponse:
+        """Capture fresh DOM and PNG within the original deadline, without origin replay.
+
+        POST capture renders its fetched body through a temporary page-local fulfillment.
+        Initial response metadata and explicit target URLs are retained; otherwise the
+        live page supplies the URL. Disabled options return the source unchanged.
+        """
+        if wait_in_seconds <= 0 and not return_screenshot:
+            return source
+
+        async with asyncio.timeout(self.get_time_left()):
+            if post_response:
+                await self._render_post_response(source)
+            if wait_in_seconds > 0:
+                await asyncio.sleep(wait_in_seconds)
+            tree = await self.build_dom_tree()
+            self._raise_if_challenge_title(tree)
+            page = self._tg.ppage
+            screenshot = await self._capture_png_base64(page) if return_screenshot else None
+            return PageResponse(
+                source=_add_doctype_header(tree.serialize(Html())),
+                status_code=source.status_code,
+                headers=source.headers,
+                user_agent=source.user_agent,
+                url=source.url or page.url,
+                screenshot=screenshot,
+                turnstile_token=source.turnstile_token,
+                captcha_provider=source.captcha_provider,
+                captcha_token=source.captcha_token,
+            )
+
+    @contextlib.asynccontextmanager
+    async def media_filter(self: Self) -> "AsyncIterator[None]":
+        """Temporarily abort image, stylesheet, and font requests on the selected page."""
+        page = self._tg.ppage
+
+        async def filter_route(route: "Route") -> None:
+            if route.request.resource_type in _MEDIA_RESOURCE_TYPES:
+                await route.abort()
+            else:
+                await route.fallback()
+
+        await page.route("**/*", filter_route)
+        try:
+            yield
+        finally:
+            await page.unroute("**/*", filter_route)
+
+    async def _render_post_response(self, source: PageResponse) -> None:
+        """Render the captured POST body locally, without another origin request."""
+        if source.url is None:
+            msg = "POST response has no target URL"
+            raise PageLoadError(msg)
+        page = self._tg.ppage
+
+        async def fulfill(route: "Route") -> None:
+            if route.request.is_navigation_request() and route.request.frame == page.main_frame:
+                headers = {
+                    name: value
+                    for name, value in source.headers.items()
+                    if name.lower() not in {"content-length", "content-encoding", "transfer-encoding", "set-cookie"}
+                }
+                await route.fulfill(status=200, headers=headers, body=source.text)
+            else:
+                await route.fallback()
+
+        await page.route(source.url, fulfill)
+        try:
+            await page.goto(source.url, wait_until="domcontentloaded", timeout=max(1, self.get_time_left() * 1000))
+        finally:
+            await page.unroute(source.url, fulfill)
+
+    @staticmethod
+    async def _capture_png_base64(page: "Page") -> str:
+        """Return *page*'s default-viewport PNG as Base64 ASCII text."""
+        return base64.b64encode(await page.screenshot(type="png")).decode("ascii")
+
+    async def _warm_origin_root(self, url: str) -> None:
+        """Warm *url*'s origin root through the normal GET solver path.
+
+        Delegating to :func:`resolve_page_handler` routes the origin root through the
+        same Cloudflare detection and auto-solve a normal GET uses, so a
+        protected origin is genuinely warmed before the same-origin POST fetch
+        runs. The warm fetch owns and releases its own page listeners.
+        """
+        origin = _origin_root(url)
+        if origin is None:
+            return
+        handler = resolve_page_handler(self._tg, origin)
+        await handler.get(origin, round(self.get_time_left()))
+
+    async def _cleanup(self) -> None:
+        if self.cleanup_done:
+            return
+        solver_released = True
+        try:
+            if self._active_solver is not None or self.cf_auto_solve_enabled:
+                solver_released = False
+                await self._stop_challenge_solver()
+                solver_released = True
+        finally:
+            try:
+                await self.tab.disable_page_events()
+            finally:
+                try:
+                    await self._remove_network_listeners()
+                finally:
+                    await self._remove_scoped_headers()
+                    self.cleanup_done = solver_released
+
+    async def _install_scoped_headers(self, headers: dict[str, str], header_scope: str | None) -> None:
+        """Install a temporary route that cannot leak headers across origins."""
+        if header_scope not in HEADER_SCOPES:
+            msg = f"unsupported header scope: {header_scope!r}"
+            raise PageLoadError(msg)
+        try:
+            headers = normalize_custom_headers(headers)
+        except ValueError as error:
+            raise PageLoadError(str(error)) from error
+
+        page = self._tg.ppage
+        target_url = self.url
+
+        def matcher(candidate: str) -> bool:
+            if header_scope == HEADER_SCOPE_DOCUMENT:
+                return _are_urls_equal(candidate, target_url)
+            return _same_origin(candidate, target_url)
+
+        document_header_sent = False
+
+        async def apply_headers(route: Any) -> None:
+            nonlocal document_header_sent
+            request = route.request
+            if header_scope == HEADER_SCOPE_DOCUMENT:
+                if document_header_sent or not (request.is_navigation_request() and request.frame == page.main_frame):
+                    await route.continue_()
+                    return
+                document_header_sent = True
+
+            merged = await request.all_headers()
+            merged.update(headers)
+            await route.continue_(headers=merged)
+
+        await page.route(matcher, apply_headers)
+        self._header_route_matcher = matcher
+        self._header_route_handler = apply_headers
+
+    async def _remove_scoped_headers(self) -> None:
+        """Remove the temporary header route before the page can be reused."""
+        if self._header_route_handler is None:
+            return
+        matcher = self._header_route_matcher
+        handler = self._header_route_handler
+        await self._tg.ppage.unroute(matcher, handler)
+        self._header_route_matcher = None
+        self._header_route_handler = None
+
+    async def _wait_page_load(self: Self) -> None:
+        """Wait for document.readyState to be options.page_load_state."""
+        while True:
+            result = await self.tab.execute_script("document.readyState")
+            state: str | None = result["result"]["result"].get("value")
+            if state == self._tg.fp.options.page_load_state.value:
+                return
+            await asyncio.sleep(0.1)
+
+    async def _check_if_loaded(self: Self, *, cleanup: bool = True) -> bool:
+        """Checks if the page was loaded.
+
+        Better to Implement it explicitly for any site based on element visibility or any other mechanism. Used with
+        Browsers's Network Monitor (CDP).
+        """
+        try:
+            async with asyncio.timeout(self.timeout):
+                await self._loaded.wait()
+        except TimeoutError:
+            logger.error("Timeout occurred!")
+            return False
+        else:
+            return self.response_found is not None and self.response_found
+        finally:
+            if cleanup:
+                await self._cleanup()
+            if self.response_found:
+                logger.success(f"Response found set from interceptor [loaded]: {self.status_code}")
+            else:
+                logger.error(f"Response failed with possible status code: {self.status_code}")
+
+    async def _on_request(self: Self, event: dict[str, Any]) -> None:
+        """Intercepts requests using CDP for the page."""
+        params = event["params"]
+        _params = {"requestId": params["requestId"]}
+        if self.response_found:
+            # Don't intercept, just continue the request
+            await self.tab.continue_request(_params["requestId"])
+            return
+
+        url = params["request"]["url"]
+        status_code = params.get("responseStatusCode")
+        self.user_agent = params["request"]["headers"]["User-Agent"]
+        if _are_urls_equal(url, (self.cf_encountered_on_url or self.redirected_url or self.url)):
+            self.status_code = status_code
+            self.response_headers = _generate_headers(params.get("responseHeaders", []))
+        logger.debug(f"Status code: {status_code} -> Page: {url}")
+        if (
+            _are_urls_equal(url, self.url)
+            and self.cf_encountered
+            and not str(status_code).startswith("2")
+            and status_code != self.NOT_FOUND_STATUS_CODE
+        ):
+            self.cf_encountered = False
+            logger.debug("CF re-encounter; Box appeared again")
+        if params.get("responseStatusCode") in [301, 302, 303, 307, 308]:
+            # redirected request
+            if _are_urls_equal(url, (self.redirected_url or self.url)):
+                lheader = next(
+                    filter(lambda obj: obj["name"].lower() == "location", params["responseHeaders"]),
+                    None,
+                )
+                self.redirected_url = urljoin(url, lheader["value"]) if lheader else None
+            await self.tab.continue_request(_params["requestId"])
+            return
+
+        ## Ref: https://github.com/ttlns/Selenium-Driverless/blob/eca2bd74c17f071ce84b3eae63de81b74877956b/README.md?plain=1#L131
+        cmd = FetchCommands.get_response_body(_params["requestId"])
+        _body = await self.tab._execute_command(cmd)  # noqa: SLF001
+        body_response = cast("Mapping[str, Any]", _body)
+        body = body_response.get("result", None)
+        if not body:
+            e = body_response["error"]
+            ERROR_CODE = -32000  # noqa: N806
+            if (
+                e["code"] == ERROR_CODE
+                and e["message"] == "Can only get response body on requests captured after headers received."
+            ):
+                cmd = FetchCommands.continue_response(_params["requestId"])
+                await self.tab._execute_command(cmd)  # noqa: SLF001
+                return
+            raise RuntimeError(e)
+
+        await self.tab.continue_request(_params["requestId"])
+        if not self.cf_encountered:
+            await self._check_cf_encounter(url, dict(body))
+
+        _status_code = str(params["responseStatusCode"])
+        if (
+            _are_urls_equal(url, self.redirected_url or self.url)
+            and (_status_code.startswith("2") or _status_code == str(self.NOT_FOUND_STATUS_CODE))
+        ) or (_are_urls_equal(url, self.cf_encountered_on_url) and _status_code.startswith("2")):
+            await self._remove_network_listeners()
+            self.status_code = status_code
+            self.response_headers = _generate_headers(params.get("responseHeaders", []))
+            self.response_found = True
+            self._loaded.set()
+
+        return
+
+    async def _add_network_listeners(self: Self) -> None:
+        """Add network listeners to the browser session."""
+        await self.tab.enable_fetch_events(request_stage=RequestStage.RESPONSE)
+        self._on_request_callback_id = await self.tab.on(FetchEvent.REQUEST_PAUSED, self._on_request)
+
+    async def _remove_network_listeners(self: Self) -> None:
+        """Remove network listeners from the browser session."""
+        if callback_id := self._on_request_callback_id:
+            await self.tab.remove_callback(callback_id)
+        self._on_request_callback_id = None
+        await self.tab.disable_fetch_events()
+
+    async def _check_cf_encounter(self: Self, url: str, body: dict[str, Any]) -> None:
+        """Check if cf was encountered on the page."""
+        try:
+            body_decoded = body["body"]
+            if body["base64Encoded"]:
+                body_decoded = base64.b64decode(body_decoded).decode()
+            doc = tb_parse(body_decoded)
+            title = doc.select_one("title")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Exception occurred while checking for cf: {e}")
+        else:
+            if title and title.text.startswith("Just a moment") and not self.cf_encountered:
+                self.cf_encountered = True
+                self.cf_encountered_on_url = url
+                logger.debug("[Cloudflare] encountered the checkbox challenge")
+                if not self.cf_auto_solve_enabled:
+                    logger.debug("[Cloudflare] enabled auto-solving the challenge")
+                    await self.start_challenge_solver()
+
+    async def start_challenge_solver(self: Self) -> None:
+        """Activate the challenge solver on the current tab exactly once.
+
+        The solver instance and the exact native tab it activates are captured
+        before awaiting, so a failed or cancelled activation is still stopped
+        on that same tab during cleanup. The native response and loaded DOM
+        remain the authority on whether the challenge was solved.
+        """
+        if self._active_solver is not None:
+            return
+        solver = self.challenge_solver
+        tab = self.tab
+        self._active_solver = (solver, tab)
+        async with asyncio.timeout(self.get_time_left()):
+            await solver.start(tab)
+        self.cf_auto_solve_enabled = True
+
+    async def _stop_challenge_solver(self: Self) -> None:
+        """Stop the owned challenge solver, releasing ownership only on success.
+
+        A failed stop keeps the captured solver and tab so the next cleanup
+        retries the same instance and tab even if the site's selected solver
+        changed in the meantime. When the auto-solve flag was set without a
+        captured tuple, the current solver is selected for backwards
+        compatibility.
+        """
+        owned = self._active_solver
+        if owned is None:
+            if not self.cf_auto_solve_enabled:
+                return
+            owned = (self.challenge_solver, self.tab)
+        solver, tab = owned
+        await solver.stop(tab)
+        self._active_solver = None
+        self.cf_auto_solve_enabled = False
+
+    async def build_dom_tree(self) -> Element:
+        """Build full DOM tree as a turbohtml Element.
+
+        Uses ``DOM.getDocument(depth=-1, pierce=True)`` to get the full
+        node tree, then walks it recursively to build a turbohtml tree.
+        It is because the directly accessing the document.outerHTML
+        misses iframe contentDocument.
+
+        Returns
+        -------
+            The ``<html>`` Element as the root of the document.
+        """
+        resp = await self.tab._execute_command(  # noqa: SLF001
+            DomCommands.get_document(depth=-1, pierce=True),
+        )
+        root = resp.get("result", {}).get("root", {})
+        if not root:
+            logger.warning("The document root is not available!")
+            return Element("html")
+        result = await self._build_turbo_node(root)
+        if result is None or isinstance(result, Text):
+            return Element("html")
+        return result
+
+    # CDP nodeType constants (DOM standard)
+    _ELEMENT_NODE = 1
+    _TEXT_NODE = 3
+    _DOCUMENT_NODE = 9
+    _DOCUMENT_FRAGMENT_NODE = 11
+
+    async def _build_turbo_node(self, node: PDNode) -> Element | Text | None:
+        """Map a CDP Node dict to a turbohtml Element/Text tree."""
+        node_type = node.get("nodeType")
+
+        if node_type == self._TEXT_NODE:
+            return self._build_text_node(node)
+        if node_type == self._DOCUMENT_NODE:
+            return await self._build_document_node(node)
+        if node_type == self._ELEMENT_NODE:
+            return await self._build_element_node(node)
+        if node_type == self._DOCUMENT_FRAGMENT_NODE:
+            return None
+
+        return None
+
+    @staticmethod
+    def _build_text_node(node: PDNode) -> Text:
+        """Create a Text node from a CDP text node."""
+        return Text(node.get("nodeValue") or "")
+
+    async def _build_document_node(self, node: PDNode) -> Element | None:
+        """Build the <html> Element from a CDP document node."""
+        children = node.get("children") or []
+        for child in children:
+            if child.get("nodeName") == "HTML":
+                result = await self._build_turbo_node(child)
+                if isinstance(result, Element):
+                    return result
+                if isinstance(result, Text):
+                    logger.warning(f"Expected a document node to be '{type(Element)}' but got '{type(Text)}'")
+                    return None
+        # Fallback: wrap all children in an <html> element
+        html_el = Element("html")
+        await self._append_children(html_el, node)
+        return html_el
+
+    async def _build_element_node(self, node: PDNode) -> Element:
+        """Build an Element node from a CDP element node."""
+        tag = (node.get("localName") or node.get("nodeName", "")).lower()
+        attrs_list = node.get("attributes") or []
+        attrs = dict(zip(attrs_list[::2], attrs_list[1::2], strict=False))
+        el = Element(tag, attrs=attrs)
+
+        if tag == "iframe":
+            return await self._build_iframe_element(el, node)
+
+        await self._append_children(el, node)
+        return el
+
+    async def _build_iframe_element(
+        self,
+        el: Element,
+        node: PDNode,
+    ) -> Element:
+        """Populate an iframe element with its inner document HTML."""
+        content_document = node.get("contentDocument")
+        if content_document or node.get("frameId"):
+            inner = await (
+                self._build_turbo_node(content_document) if content_document else self._build_oopif_subtree(node)
+            )
+            if inner is not None:
+                el.set_inner_html(inner.serialize(Html()))
+        return el
+
+    async def _append_children(
+        self,
+        el: Element,
+        node: PDNode,
+    ) -> None:
+        """Append regular children and shadow root children to an element."""
+        for child in node.get("children") or []:
+            child_node = await self._build_turbo_node(child)
+            if child_node is not None:
+                el.append(child_node)
+
+        for sr in node.get("shadowRoots") or []:
+            for sr_child in sr.get("children") or []:
+                child_node = await self._build_turbo_node(sr_child)
+                if child_node is not None:
+                    el.append(child_node)
+
+    async def _build_oopif_subtree(self, node: PDNode) -> Element | None:
+        """Attach to an OOPIF target, build its DOM subtree, and fix CDP-truncated text nodes via a second fetch."""
+        frame_id = node.get("frameId")
+        if frame_id is None:
+            logger.warning(f"Expected frame id is None for node {node}")
+            return None
+        try:
+            attach_resp = await self.tab._execute_command(  # noqa: SLF001
+                TargetCommands.attach_to_target(frame_id, flatten=True),
+            )
+            session_id = attach_resp["result"]["sessionId"]
+
+            # Build the CDP tree (preserves shadow roots)
+            get_doc = DomCommands.get_document(depth=-1, pierce=True)
+            get_doc["sessionId"] = session_id
+            doc_resp = await self.tab._execute_command(get_doc)  # noqa: SLF001
+
+            # Also fetch full HTML for untruncated text
+            eval_cmd = RuntimeCommands.evaluate(
+                expression="document.documentElement.outerHTML",
+                return_by_value=True,
+            )
+            eval_cmd["sessionId"] = session_id
+            html_resp = await self.tab._execute_command(eval_cmd)  # noqa: SLF001
+            full_html: str = html_resp.get("result", {}).get("result", {}).get("value", "")
+
+            await self.tab._execute_command(  # noqa: SLF001
+                TargetCommands.detach_from_target(session_id),
+            )
+
+            root = doc_resp.get("result", {}).get("root", {})
+            if not root:
+                return None
+
+            result = await self._build_turbo_node(root)
+
+            # Fix truncated text nodes using the full HTML
+            if result is not None and full_html:
+                self._fix_truncated_text(result, full_html)
+
+            return result if not isinstance(result, Text) else None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"OOPIF target attach failed for {frame_id}: {exc}",
+            )
+            return None
+
+    @staticmethod
+    def _fix_truncated_text(
+        tree: Node,
+        full_html: str,
+    ) -> None:
+        """Replace CDP-truncated text nodes with their full versions."""
+        ref_doc = tb_parse(f"<!DOCTYPE html>{full_html}")
+        # Collect all Text nodes from both trees in document order
+        cdp_texts: list[Text] = []
+        ref_texts: list[Text] = []
+
+        def _collect_texts(
+            el: Node,
+            into: list[Text],
+        ) -> None:
+            if isinstance(el, Text):
+                into.append(el)
+            elif hasattr(el, "children"):
+                for child in el.children:
+                    _collect_texts(child, into)
+
+        _collect_texts(tree, cdp_texts)
+        _collect_texts(ref_doc, ref_texts)
+
+        # Walk both lists in lockstep; replace any CDP text that looks
+        # truncated (ends with ellipsis) with the matching ref text.
+        for cdp_t, ref_t in zip(cdp_texts, ref_texts, strict=False):
+            cdp_val = cdp_t.text or ""
+            ref_val = ref_t.text or ""
+            if cdp_val.endswith("\u2026") and len(ref_val) > len(cdp_val):
+                cdp_t.replace_with(Text(ref_val))
+
+
+def _origin_root(url: str) -> str | None:
+    """Return the scheme://host/ root of *url*, or ``None`` when unparseable."""
+    parts = urlsplit(url)
+    if not parts.scheme or not parts.netloc:
+        return None
+    return f"{parts.scheme}://{parts.netloc}/"
+
+
+def _same_origin(current_url: str, target_url: str) -> bool:
+    """Return whether two URLs have the same scheme, host, and effective port."""
+    try:
+        current = urlsplit(current_url)
+        target = urlsplit(target_url)
+        current_port = current.port or (443 if current.scheme.lower() == "https" else 80)
+        target_port = target.port or (443 if target.scheme.lower() == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        current.scheme.lower() == target.scheme.lower()
+        and current.hostname is not None
+        and current.hostname.lower() == (target.hostname or "").lower()
+        and current_port == target_port
+    )
+
+
+def _build_post_fetch_script(url: str, post_data: str, headers: dict[str, str]) -> str:
+    """Return a page-context script that performs a POST and reports the response.
+
+    Values are embedded as JSON literals so caller-supplied strings cannot
+    escape the script body.
+    """
+    url_literal = json.dumps(url)
+    body_literal = json.dumps(post_data) if post_data else "null"
+    headers_literal = json.dumps(headers)
+    return f"""
+new Promise((resolve) => {{
+  const options = {{ method: "POST", credentials: "include", headers: {headers_literal} }};
+  const body = {body_literal};
+  if (body !== null) {{ options.body = body; }}
+  fetch({url_literal}, options)
+    .then(async (response) => {{
+      const text = await response.text();
+      const captured = {{}};
+      response.headers.forEach((value, key) => {{ captured[key] = value; }});
+      resolve({{ status: response.status, headers: captured, body: text, userAgent: navigator.userAgent }});
+    }})
+    .catch((error) => resolve({{ status: 0, headers: {{}}, body: "", error: String(error) }}));
+}});
+"""
+
+
+_TURNSTILE_RESPONSE_EXPRESSION = (
+    "() => { try { return window.turnstile?.getResponse?.() || null; } catch { return null; } }"
+)
+
+_TURNSTILE_TOKEN_EXPRESSION = (
+    "initial => {"
+    f" const inputs = document.querySelectorAll({json.dumps(_TURNSTILE_INPUT_SELECTOR)});"
+    " for (const input of inputs) {"
+    "   if (input.value && !initial.includes(input.value)) return input.value;"
+    " }"
+    " return null;"
+    " }"
+)
+
+
+async def _wait_turnstile_token(page: "Page", initial: list[str], timeout_ms: int) -> str | None:
+    handle = await page.wait_for_function(_TURNSTILE_TOKEN_EXPRESSION, arg=initial, timeout=timeout_ms)
+    try:
+        value = await handle.json_value()
+        return value if isinstance(value, str) else None
+    finally:
+        await handle.dispose()
+
+
+def _are_urls_equal(current_url: str | None, target_url: str | None) -> bool:
+    """Compare a current URL against a target URL configuration.
+
+    Matches if the current_url contains all query parameters specified in target_url,
+    allowing current_url to have additional parameters.
+    """
+    if current_url is None or target_url is None:
+        return False
+
+    try:
+        current = urlsplit(current_url)
+        target = urlsplit(target_url)
+
+        if current.scheme.lower() != target.scheme.lower():
+            return False
+        if current.netloc.lower() != target.netloc.lower():
+            return False
+
+        current_path = current.path if current.path.endswith("/") else current.path + "/"
+        target_path = target.path if target.path.endswith("/") else target.path + "/"
+        if current_path != target_path:
+            return False
+
+        if not target.query:
+            return True
+
+        current_params = set(parse_qsl(current.query))
+        target_params = set(parse_qsl(target.query))
+
+        return target_params.issubset(current_params)
+
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"Error comparing URLs: {current_url} vs {target_url}. Error: {e}")
+        return False
+
+
+def _generate_headers(headers: list[dict[str, str]]) -> CaseInsensitiveDict:  # type: ignore[type-arg]
+    gen_headers: CaseInsensitiveDict = CaseInsensitiveDict()  # type: ignore[type-arg]
+    for _header in headers:
+        gen_headers.update({_header["name"]: _header["value"]})
+    return gen_headers
+
+
+# Domain-specific handlers are selected by URL hostname; last registration wins.
+_page_handlers: list[tuple[str, type[PageHandler]]] = []
+
+
+def register_page_handler(pattern: str, handler_cls: type[PageHandler]) -> None:
+    """Register a page handler for URLs whose hostname matches *pattern*.
+
+    *pattern* is a bare domain (``"example.com"``).  It matches exact
+    hostnames and subdomains (``"example.com"``, ``"www.example.com"``).
+
+    Registrations are checked in insertion order - later registrations
+    take priority over earlier ones.
+    """
+    _page_handlers.insert(0, (pattern, handler_cls))
+
+
+def resolve_page_handler(tab_group: TabGroup, url: str) -> PageHandler:
+    """Return the :class:`PageHandler` responsible for *url*."""
+    host = urlsplit(url).hostname
+    if host:
+        for pattern, handler_cls in _page_handlers:
+            if host == pattern or host.endswith("." + pattern):
+                return handler_cls(tab_group)
+    return PageHandler(tab_group)
+
+
+async def fetch(
+    tab_group: TabGroup,
+    url: str,
+    timeout: int = 60,  # noqa: ASYNC109
+    *,
+    headers: dict[str, str] | None = None,
+    header_scope: str | None = None,
+) -> PageResponse:
+    """Load *url* in *tab_group* and return its :class:`PageResponse`.
+
+    Waits for the page to load until *timeout* is hit. Optional headers are
+    limited by ``header_scope`` to the initial document or exact target origin.
+    Raises :class:`PageLoadError` on load failure.
+    """
+    handler = resolve_page_handler(tab_group, url)
+    if headers:
+        return await handler.get(url, timeout, headers=headers, header_scope=header_scope)
+    return await handler.get(url, timeout)
+
+
+async def load_page(
+    url: str,
+    timeout: int = 60,  # noqa: ASYNC109
+    *,
+    headers: dict[str, str] | None = None,
+    header_scope: str | None = None,
+) -> PageResponse:
+    """Wrapper to return html source of the url on successful loading.
+
+    Waits for the page to load until timeout is hit.
+    Raises `PageLoadError` on load failure.
+
+    Still be prepared for any other exceptions for example, for now,
+    setup won't run on Windows and you are responsible to download chrome,
+    hence can error if they aren't detected when starting the Browser instance.
+    """
+    tg = None
+    try:
+        await Browser.start()
+        tg = await Browser.create()
+        fetch_task = (
+            fetch(tg, url, timeout, headers=headers, header_scope=header_scope) if headers else fetch(tg, url, timeout)
+        )
+        source = await get_process_cancel_token().race(fetch_task, poll_interval=1)
+        # Don't load any cookies into browser as it already loads in persistent ctx
+        stored_cookies = Cookies()
+        stored_cookies.update_cookies(cast("list[Cookie]", await tg.pd().get_cookies()))
+        return source
+    finally:
+        await Browser.finally_cleanup(tg)
+
+
+def load_page_sync(
+    url: str,
+    timeout: int,
+    *,
+    headers: dict[str, str] | None = None,
+    header_scope: str | None = None,
+) -> PageResponse | None:
+    """Load *url* in a browser via :func:`run_coroutine_sync`.
+
+    Returns the page source, or ``None`` on failure.
+    """
+    try:
+        source_task = (
+            load_page(url, timeout, headers=headers, header_scope=header_scope) if headers else load_page(url, timeout)
+        )
+        return run_coroutine_sync(source_task)  # type: ignore[no-any-return]
+    except Exception as e:  # noqa: BLE001
+        logger.exception(f"failed to load url in the browser: {e}")
+        return None
+
+
+def _clear_stored_cookies() -> None:
+    cookies = Cookies()
+    cookies.delete_cookies()
+
+
+atexit.register(_clear_stored_cookies)

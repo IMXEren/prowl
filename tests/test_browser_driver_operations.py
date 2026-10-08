@@ -37,6 +37,8 @@ class _FakePlaywrightContext:
 
     async def new_page(self) -> MagicMock:
         page = MagicMock(name=f"page-{len(self.pages_created)}")
+        # A page knows the context it belongs to, which is how a popup is resolved.
+        page.context = self
         page.close = AsyncMock()
         self.pages_created.append(page)
         return page
@@ -172,7 +174,7 @@ class TypeIgnoreGateTests(TestCase):
         for path in [
             "src/prowl/browser/browser.py",
             "src/prowl/browser/driver/runtime.py",
-            "src/prowl/browser/site.py",
+            "src/prowl/browser/page_handler.py",
         ]:
             for line_no, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), start=1):
                 if "type: ignore" in line and "type: ignore[" not in line:

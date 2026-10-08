@@ -56,8 +56,13 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         self.driver = _DriverDouble()
         self.lifecycle = BrowserLifecycle(cast("BrowserRuntimeState", self.driver))
 
-    async def _start(self, *, running: bool = False) -> _StartResult:
+    async def _start(self, *, running: bool = False, prime_error: Exception | None = None) -> _StartResult:
         events: list[str] = []
+
+        def record_prime(_args: list[str]) -> None:
+            if prime_error is not None:
+                raise prime_error
+            events.append("prime")
 
         with (
             patch.object(BrowserLifecycle, "unpack_profile", side_effect=lambda: events.append("unpack")),
@@ -65,7 +70,7 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
             patch.object(
                 BrowserLifecycle,
                 "_prime_profile",
-                AsyncMock(side_effect=lambda _args: events.append("prime")),
+                AsyncMock(side_effect=record_prime),
             ),
             patch.object(BrowserLifecycle, "_inject_search_engine", side_effect=lambda: events.append("search")),
             patch(
@@ -106,6 +111,55 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
             ["--remote-debugging-port=9999", "--window-size=1920,980", "--window-position=0,0"],
         )
         self.assertFalse(hasattr(request, "ws_url"))
+
+    async def test_authenticated_proxy_is_rejected_before_profile_or_launch(self) -> None:
+        self.lifecycle.apply_config(
+            BrowserConfig(proxy_url="socks5h://example:secret@proxy.invalid:10001"),
+            is_running=lambda: False,
+        )
+        with (
+            self.assertRaisesRegex(BrowserStartError, "invalid authenticated browser proxy"),
+            patch.object(BrowserLifecycle, "restore_profile_from_archive") as restore,
+        ):
+            await self._start()
+        restore.assert_not_called()
+        self.driver.start_live.assert_not_awaited()
+
+    async def test_authenticated_http_proxy_launch_uses_only_the_local_bridge(self) -> None:
+        config = BrowserConfig(proxy_url="https://user:secret@proxy.invalid:10001")
+        self.lifecycle.apply_config(config, is_running=lambda: False)
+        result = await self._start()
+        request = cast("DriverStartupConfig", result["request"])
+        flags = [arg for arg in request.launch_arguments if arg.startswith("--proxy-server=")]
+        self.assertEqual(len(flags), 1)
+        self.assertRegex(flags[0], r"^--proxy-server=http://127\.0\.0\.1:\d+$")
+        self.assertNotIn("secret", repr(config) + repr(self.lifecycle) + str(request.launch_arguments))
+        self.assertNotIn("proxy.invalid", str(request.launch_arguments))
+        bridge = self.lifecycle._proxy_bridge
+        self.assertIsNotNone(bridge)
+        with patch.object(BrowserLifecycle, "do_sync_chores_before_exit"):
+            await self.lifecycle._cleanup_resources()
+        self.assertIsNone(self.lifecycle._proxy_bridge)
+        self.assertIsNone(bridge.listen_url if bridge is not None else None)
+
+    async def test_failed_authenticated_profile_priming_releases_the_bridge(self) -> None:
+        self.lifecycle.apply_config(
+            BrowserConfig(proxy_url="https://user:secret@proxy.invalid:10001"), is_running=lambda: False
+        )
+        with self.assertRaisesRegex(RuntimeError, "prime failed"):
+            await self._start(prime_error=RuntimeError("prime failed"))
+        self.assertIsNone(self.lifecycle._proxy_bridge)
+        self.driver.start_live.assert_not_awaited()
+
+    async def test_failed_authenticated_browser_launch_releases_the_bridge(self) -> None:
+        self.lifecycle.apply_config(
+            BrowserConfig(proxy_url="http://user:secret@proxy.invalid:10001"), is_running=lambda: False
+        )
+        self.driver.start_live.side_effect = RuntimeError("test launch failed")
+        with self.assertRaisesRegex(BrowserStartError, "failed to start"):
+            await self._start()
+        self.driver.rollback_start.assert_awaited_once()
+        self.assertIsNone(self.lifecycle._proxy_bridge)
 
     async def test_input_variation_configured_window_size_replaces_the_fingerprint_size(self) -> None:
         """A configured window size replaces the fingerprint size, which is a persona value."""
