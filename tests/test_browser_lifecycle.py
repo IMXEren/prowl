@@ -37,7 +37,7 @@ def _reset_browser_state() -> None:
     """Reset all Browser class-level state for test isolation.
 
     Browser no longer owns lifecycle state (shutdown_state, shutdown_task,
-    signal info, etc.) — that is all on BrowserLifecycle.
+    signal info, etc.) - that is all on BrowserLifecycle.
     This function resets only Browser's live resource state and wiring.
     """
     Browser._runtime = BrowserRuntimeState(max_groups=Browser._MAX_GROUPS)
@@ -813,7 +813,9 @@ class StartupRollbackTests(IsolatedAsyncioTestCase):
         mock_pd.connect = AsyncMock(return_value=mock_tab)
         mock_main_ctx = MagicMock()
         mock_main_ctx.close = AsyncMock()
-        mock_main_ctx.pages = [MagicMock()]
+        mock_page = MagicMock()
+        mock_page.close = AsyncMock()
+        mock_main_ctx.pages = [mock_page]
 
         bases = _startup_base_patches()
         extras = [
@@ -1157,8 +1159,8 @@ class SyncIntegrationTests(IsolatedAsyncioTestCase):
         """Reset class state."""
         _reset_browser_state()
 
-    async def test_source_shuts_down_browser_before_returning(self) -> None:
-        """source() must call Browser.shutdown() in its finally block."""
+    async def test_load_page_shuts_down_browser_before_returning(self) -> None:
+        """load_page() must close its browser in the finally block."""
         pd_cookies_mock = MagicMock(get_cookies=AsyncMock(return_value=[]))
         mock_tg = MagicMock()
         mock_tg.quit = AsyncMock()
@@ -1168,19 +1170,19 @@ class SyncIntegrationTests(IsolatedAsyncioTestCase):
         mock_site.get = AsyncMock()
 
         with (
-            patch("prowl.browser.site.Browser.start"),
-            patch("prowl.browser.site.Browser.finally_cleanup") as mock_shutdown,
-            patch("prowl.browser.site.Browser.create", return_value=mock_tg),
-            patch("prowl.browser.site.resolve_site", return_value=mock_site),
-            patch("prowl.browser.site.Cookies"),
+            patch("prowl.browser.page_handler.Browser.start"),
+            patch("prowl.browser.page_handler.Browser.finally_cleanup") as mock_shutdown,
+            patch("prowl.browser.page_handler.Browser.create", return_value=mock_tg),
+            patch("prowl.browser.page_handler.resolve_page_handler", return_value=mock_site),
+            patch("prowl.browser.page_handler.Cookies"),
         ):
-            from prowl.browser.site import source  # noqa: PLC0415
+            from prowl.browser.page_handler import load_page  # noqa: PLC0415
 
-            await source("http://example.com", 10)
+            await load_page("http://example.com", 10)
 
         mock_shutdown.assert_awaited_once()
 
-    async def test_source_shuts_down_browser_on_fetch_failure(self) -> None:
+    async def test_load_page_shuts_down_browser_on_fetch_failure(self) -> None:
         """Browser.shutdown() must be called even if the fetch fails."""
         mock_tg = MagicMock()
         mock_tg.quit = AsyncMock(side_effect=RuntimeError("quit fails too"))
@@ -1189,20 +1191,20 @@ class SyncIntegrationTests(IsolatedAsyncioTestCase):
         mock_site.get = AsyncMock(side_effect=RuntimeError("fetch failed"))
 
         with (
-            patch("prowl.browser.site.Browser.start"),
-            patch("prowl.browser.site.Browser.finally_cleanup") as mock_shutdown,
-            patch("prowl.browser.site.Browser.create", return_value=mock_tg),
-            patch("prowl.browser.site.resolve_site", return_value=mock_site),
+            patch("prowl.browser.page_handler.Browser.start"),
+            patch("prowl.browser.page_handler.Browser.finally_cleanup") as mock_shutdown,
+            patch("prowl.browser.page_handler.Browser.create", return_value=mock_tg),
+            patch("prowl.browser.page_handler.resolve_page_handler", return_value=mock_site),
         ):
-            from prowl.browser.site import source  # noqa: PLC0415
+            from prowl.browser.page_handler import load_page  # noqa: PLC0415
 
             with self.assertRaises(RuntimeError):
-                await source("http://example.com", 10)
+                await load_page("http://example.com", 10)
 
         mock_shutdown.assert_awaited_once()
 
-    async def test_source_propagates_cleanup_failure_without_signal_registration(self) -> None:
-        """Source cleanup failure propagates without owning process-signal registration."""
+    async def test_load_page_propagates_cleanup_failure_without_signal_registration(self) -> None:
+        """Page source cleanup failure propagates without owning process-signal registration."""
         events: list[str] = []
         mock_tg = MagicMock()
         mock_tg.pd.return_value.get_cookies = AsyncMock(return_value=[])
@@ -1213,21 +1215,21 @@ class SyncIntegrationTests(IsolatedAsyncioTestCase):
             raise RuntimeError(msg)
 
         with (
-            patch("prowl.browser.site.Browser.start"),
-            patch("prowl.browser.site.Browser.create", return_value=mock_tg),
-            patch("prowl.browser.site.fetch", new=AsyncMock(return_value=MagicMock())),
-            patch("prowl.browser.site.Browser.finally_cleanup", side_effect=fail_cleanup),
-            patch("prowl.browser.site.Cookies"),
+            patch("prowl.browser.page_handler.Browser.start"),
+            patch("prowl.browser.page_handler.Browser.create", return_value=mock_tg),
+            patch("prowl.browser.page_handler.fetch", new=AsyncMock(return_value=MagicMock())),
+            patch("prowl.browser.page_handler.Browser.finally_cleanup", side_effect=fail_cleanup),
+            patch("prowl.browser.page_handler.Cookies"),
         ):
-            from prowl.browser.site import source  # noqa: PLC0415
+            from prowl.browser.page_handler import load_page  # noqa: PLC0415
 
             with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
-                await source("http://example.com", 10)
+                await load_page("http://example.com", 10)
 
         self.assertEqual(events, ["cleanup"])
 
-    async def test_source_cleanup_starts_after_fetch_cancellation(self) -> None:
-        """Source retains ordinary finally cleanup when fetch is cancelled."""
+    async def test_load_page_cleanup_starts_after_fetch_cancellation(self) -> None:
+        """Page source retains ordinary finally cleanup when fetch is cancelled."""
         mock_tg = MagicMock()
         fetch_started = asyncio.Event()
         cleanup_started = asyncio.Event()
@@ -1243,14 +1245,14 @@ class SyncIntegrationTests(IsolatedAsyncioTestCase):
             await release_cleanup.wait()
 
         with (
-            patch("prowl.browser.site.Browser.start"),
-            patch("prowl.browser.site.Browser.create", return_value=mock_tg),
-            patch("prowl.browser.site.fetch", side_effect=blocked_fetch),
-            patch("prowl.browser.site.Browser.finally_cleanup", side_effect=blocked_cleanup),
+            patch("prowl.browser.page_handler.Browser.start"),
+            patch("prowl.browser.page_handler.Browser.create", return_value=mock_tg),
+            patch("prowl.browser.page_handler.fetch", side_effect=blocked_fetch),
+            patch("prowl.browser.page_handler.Browser.finally_cleanup", side_effect=blocked_cleanup),
         ):
-            from prowl.browser.site import source  # noqa: PLC0415
+            from prowl.browser.page_handler import load_page  # noqa: PLC0415
 
-            source_task = asyncio.create_task(source("http://example.com", 10))
+            source_task = asyncio.create_task(load_page("http://example.com", 10))
             await fetch_started.wait()
             source_task.cancel()
             await cleanup_started.wait()

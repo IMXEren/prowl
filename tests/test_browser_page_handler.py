@@ -1,4 +1,4 @@
-"""Tests for Site request fidelity: header isolation, cookie ordering, and POST preflight.
+"""Tests for PageHandler request fidelity: header isolation, cookie ordering, and POST preflight.
 
 The tab group is replaced by a fake so that header isolation, origin-root warmup
 ordering, and cancellation cleanup are verified without a live browser.
@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from turbohtml import Element
 
-from prowl.browser.site import Site, Source
+from prowl.browser.page_handler import PageHandler, PageResponse
 
 
 class FakePage:
@@ -113,16 +113,16 @@ class FakeTabGroup:
 
 
 class FakeWarmSite:
-    """Fake solver returned by resolve_site for the origin-root warmup."""
+    """Fake solver returned by resolve_page_handler for the origin-root warmup."""
 
     def __init__(self, events: list[tuple[str, str]]) -> None:
         self.events = events
         self.get_calls: list[str] = []
 
-    async def get(self, url: str, timeout: int, headers: dict[str, str] | None = None) -> Source:
+    async def get(self, url: str, timeout: int, headers: dict[str, str] | None = None) -> PageResponse:
         self.events.append(("warm_get", url))
         self.get_calls.append(url)
-        return Source("<html></html>", status_code=200, url=url)
+        return PageResponse("<html></html>", status_code=200, url=url)
 
 
 async def _post_result(_url: str, _post_data: str, _headers: dict[str, str]) -> dict[str, Any]:
@@ -140,13 +140,13 @@ class SiteGetHeaderIsolationTests(IsolatedAsyncioTestCase):
         headers: dict[str, str] | None = None,
         header_scope: str | None = None,
     ) -> None:
-        site = Site(group)
+        site = PageHandler(group)
         build = AsyncMock(side_effect=RuntimeError("boom")) if fail else AsyncMock(return_value=Element("html"))
         with (
-            patch.object(Site, "_add_network_listeners", AsyncMock()),
-            patch.object(Site, "_check_if_loaded", AsyncMock(return_value=True)),
-            patch.object(Site, "_wait_page_load", AsyncMock()),
-            patch.object(Site, "build_dom_tree", build),
+            patch.object(PageHandler, "_add_network_listeners", AsyncMock()),
+            patch.object(PageHandler, "_check_if_loaded", AsyncMock(return_value=True)),
+            patch.object(PageHandler, "_wait_page_load", AsyncMock()),
+            patch.object(PageHandler, "build_dom_tree", build),
         ):
             if fail:
                 with self.assertRaises(Exception):  # noqa: B017
@@ -242,7 +242,7 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
 
     async def test_warmup_delegates_through_get_solver_not_bare_navigation(self) -> None:
         group = FakeTabGroup()
-        site = Site(group)
+        site = PageHandler(group)
         warm = FakeWarmSite(group.events)
 
         async def capture(url: str, _data: str, _headers: dict[str, str]) -> dict[str, Any]:
@@ -250,8 +250,8 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
             return await _post_result(url, "", {})
 
         with (
-            patch("prowl.browser.site.resolve_site", return_value=warm),
-            patch.object(Site, "_post_via_fetch", AsyncMock(side_effect=capture)),
+            patch("prowl.browser.page_handler.resolve_page_handler", return_value=warm),
+            patch.object(PageHandler, "_post_via_fetch", AsyncMock(side_effect=capture)),
         ):
             await site.post("https://example.com/api/search?q=1", 30, post_data="q=1", headers={})
 
@@ -265,11 +265,11 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
 
     async def test_post_does_not_install_its_own_page_listeners(self) -> None:
         group = FakeTabGroup()
-        site = Site(group)
+        site = PageHandler(group)
         warm = FakeWarmSite(group.events)
         with (
-            patch("prowl.browser.site.resolve_site", return_value=warm),
-            patch.object(Site, "_post_via_fetch", AsyncMock(side_effect=_post_result)),
+            patch("prowl.browser.page_handler.resolve_page_handler", return_value=warm),
+            patch.object(PageHandler, "_post_via_fetch", AsyncMock(side_effect=_post_result)),
         ):
             await site.post("https://example.com/api", 30, post_data="q=1", headers={})
 
@@ -277,11 +277,11 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
 
     async def test_post_cleans_up_on_cancellation(self) -> None:
         group = FakeTabGroup()
-        site = Site(group)
+        site = PageHandler(group)
         warm = FakeWarmSite(group.events)
         with (
-            patch("prowl.browser.site.resolve_site", return_value=warm),
-            patch.object(Site, "_post_via_fetch", AsyncMock(side_effect=asyncio.CancelledError())),
+            patch("prowl.browser.page_handler.resolve_page_handler", return_value=warm),
+            patch.object(PageHandler, "_post_via_fetch", AsyncMock(side_effect=asyncio.CancelledError())),
             self.assertRaises(asyncio.CancelledError),
         ):
             await site.post("https://example.com/api", 30, post_data="q=1", headers={})

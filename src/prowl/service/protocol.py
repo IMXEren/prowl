@@ -14,23 +14,42 @@ import time
 from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _distribution_version
-from typing import Any, Final
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from urllib.parse import SplitResult, urlsplit
 
 from prowl.browser.headers import HEADER_SCOPES, normalize_custom_headers
+from prowl.service.sessions import ISOLATED_MODE, SHARED_MODE, SessionMode
+
+if TYPE_CHECKING:
+    from prowl.service.classification import Classification
 
 CMD_REQUEST_GET: Final[str] = "request.get"
 CMD_REQUEST_POST: Final[str] = "request.post"
 CMD_SESSIONS_CREATE: Final[str] = "sessions.create"
 CMD_SESSIONS_LIST: Final[str] = "sessions.list"
 CMD_SESSIONS_DESTROY: Final[str] = "sessions.destroy"
+CMD_BROWSER_OPEN: Final[str] = "browser.open"
+CMD_BROWSER_CLOSE: Final[str] = "browser.close"
+CMD_BROWSER_LIST: Final[str] = "browser.list"
+CMD_COOKIES_LIST: Final[str] = "cookies.list"
 
 SUPPORTED_COMMANDS: Final[frozenset[str]] = frozenset(
-    {CMD_REQUEST_GET, CMD_REQUEST_POST, CMD_SESSIONS_CREATE, CMD_SESSIONS_LIST, CMD_SESSIONS_DESTROY},
+    {
+        CMD_REQUEST_GET,
+        CMD_REQUEST_POST,
+        CMD_SESSIONS_CREATE,
+        CMD_SESSIONS_LIST,
+        CMD_SESSIONS_DESTROY,
+        CMD_BROWSER_OPEN,
+        CMD_BROWSER_CLOSE,
+        CMD_BROWSER_LIST,
+        CMD_COOKIES_LIST,
+    },
 )
 
 ALLOWED_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https"})
 ALLOWED_PROXY_SCHEMES: Final[frozenset[str]] = frozenset({"http", "https", "socks4", "socks5"})
+_MAX_PROXY_PORT: Final[int] = 65535
 
 DEFAULT_TIMEOUT_MS: Final[int] = 60_000
 MIN_TIMEOUT_MS: Final[int] = 1_000
@@ -43,6 +62,9 @@ MAX_TTL_MINUTES: Final[int] = 60 * 24 * 7
 MAX_SESSION_ID_LENGTH: Final[int] = 128
 _SESSION_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9._:-]+$")
 
+#: Conservative bound on an interactive tab id, which callers echo back to close one.
+MAX_TAB_ID_LENGTH: Final[int] = 64
+
 #: Fields each command accepts. Anything else is rejected as unknown.
 _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
     {
@@ -51,17 +73,65 @@ _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
         "maxTimeout",
         "session",
         "session_ttl_minutes",
+        "sessionMode",
+        "mode",
         "cookies",
         "returnOnlyCookies",
         "headers",
         "headerScope",
         "proxy",
         "postData",
+        "waitInSeconds",
+        "returnScreenshot",
+        "disableMedia",
+        "tabs_till_verify",
+        "solveCaptcha",
     },
 )
-_SESSIONS_CREATE_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "session", "session_ttl_minutes"})
+_SESSIONS_CREATE_FIELDS: Final[frozenset[str]] = frozenset(
+    {"cmd", "session", "session_ttl_minutes", "sessionMode", "proxy"},
+)
 _SESSIONS_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd"})
 _SESSIONS_DESTROY_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "session"})
+
+#: ``browser.open`` takes the fetch's url, timeout and egress selector, the session that
+#: binds the tab to an egress, the cookies to seed the browser with before it navigates, and
+#: whether to open a second tab for a url that is already open. The tab stays open after the
+#: command returns, so there is no field for a method or a body.
+_BROWSER_OPEN_FIELDS: Final[frozenset[str]] = frozenset(
+    {"cmd", "url", "maxTimeout", "session", "sessionMode", "cookies", "newTab", "proxy"},
+)
+_BROWSER_CLOSE_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "tab"})
+_BROWSER_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "tab"})
+
+#: ``cookies.list`` reads the cookies held by an egress's browser profile. ``url`` scopes the
+#: answer to the cookies that would be sent there, ``proxy`` selects which profile is read, and
+#: ``session`` selects an existing session's own context. A named session must already exist.
+_COOKIES_LIST_FIELDS: Final[frozenset[str]] = frozenset({"cmd", "url", "proxy", "session"})
+
+#: Session modes the wire accepts. ``isolated`` gives the session its own browser context.
+SESSION_MODES: Final[frozenset[str]] = frozenset({SHARED_MODE, ISOLATED_MODE})
+
+#: How a fetch reaches the network. ``browser`` drives the browser, ``http`` uses the
+#: identity-matched HTTP fast path, and ``auto`` may try HTTP first and escalate to the browser
+#: on a classification that requires one. The mode is independent of the session mode, which
+#: selects the browser context a fetch runs in, and of the egress, which selects its network path.
+type ExecutionMode = Literal["browser", "http", "auto"]
+
+#: The default fetch mode, and the only one that executed a fetch before modes existed.
+BROWSER_MODE: Final[ExecutionMode] = "browser"
+
+#: HTTP only: a fetch that cannot be answered over HTTP fails rather than escalating.
+HTTP_MODE: Final[ExecutionMode] = "http"
+
+#: HTTP first, with a browser escalation on a browser-required classification.
+AUTO_MODE: Final[ExecutionMode] = "auto"
+
+#: Fetch modes the wire accepts. An omitted ``mode`` means :data:`BROWSER_MODE`.
+EXECUTION_MODES: Final[frozenset[str]] = frozenset({BROWSER_MODE, HTTP_MODE, AUTO_MODE})
+
+#: Fields the ``proxy`` object may carry: a configured url, or a configured name.
+_PROXY_FIELDS: Final[frozenset[str]] = frozenset({"url", "name"})
 
 #: The only POST header a caller may set. It carries no browser identity and
 #: is needed to send a JSON body from the page's own ``fetch``.
@@ -92,6 +162,19 @@ class ProtocolError(Exception):
         self.http_status = http_status
 
 
+@dataclass(frozen=True, slots=True)
+class ProxySelection:
+    """A caller's egress request: a configured url, or a configured egress name.
+
+    A url keeps its original meaning, accepted only when it matches a configured
+    egress. A name selects one configured egress directly. Exactly one of the two
+    is set, and neither may embed credentials.
+    """
+
+    url: str | None = None
+    name: str | None = None
+
+
 @dataclass(slots=True)
 class FetchCommand:
     """A ``request.get`` or ``request.post`` command."""
@@ -101,12 +184,19 @@ class FetchCommand:
     timeout_ms: int
     session: str | None = None
     session_ttl_minutes: int | None = None
+    session_mode: SessionMode | None = None
     headers: dict[str, str] = field(default_factory=dict)
     header_scope: str | None = None
     cookies: list[dict[str, Any]] = field(default_factory=list)
     post_data: str | None = None
     return_only_cookies: bool = False
-    proxy_url: str | None = None
+    proxy: ProxySelection | None = None
+    mode: ExecutionMode = BROWSER_MODE
+    wait_in_seconds: float = 0.0
+    return_screenshot: bool = False
+    disable_media: bool = False
+    tabs_till_verify: int | None = None
+    solve_captcha: bool = False
 
     @property
     def method(self) -> str:
@@ -125,6 +215,8 @@ class SessionsCreateCommand:
 
     session: str | None = None
     session_ttl_minutes: int | None = None
+    session_mode: SessionMode | None = None
+    proxy: ProxySelection | None = None
 
 
 @dataclass(slots=True)
@@ -139,7 +231,61 @@ class SessionsDestroyCommand:
     session: str
 
 
-Command = FetchCommand | SessionsCreateCommand | SessionsListCommand | SessionsDestroyCommand
+@dataclass(slots=True)
+class BrowserOpenCommand:
+    """A ``browser.open`` command, which leaves the tab open when it returns."""
+
+    url: str
+    timeout_ms: int
+    session: str | None = None
+    session_mode: SessionMode | None = None
+    cookies: list[dict[str, Any]] = field(default_factory=list)
+    new_tab: bool = False
+    proxy: ProxySelection | None = None
+
+    @property
+    def timeout_seconds(self) -> int:
+        """Return the command timeout rounded up to whole seconds."""
+        return max(1, (self.timeout_ms + 999) // 1000)
+
+
+@dataclass(slots=True)
+class CookiesListCommand:
+    """A ``cookies.list`` command. Without a url it reports every cookie in the profile."""
+
+    url: str | None = None
+    proxy: ProxySelection | None = None
+    session: str | None = None
+
+
+@dataclass(slots=True)
+class BrowserCloseCommand:
+    """A ``browser.close`` command. Without a tab it closes every interactive tab."""
+
+    tab: str | None = None
+
+
+@dataclass(slots=True)
+class BrowserListCommand:
+    """A ``browser.list`` command.
+
+    Without a tab it only reports the open tabs. A named tab is the one the caller is
+    displaying, and only that tab's idle countdown is refreshed.
+    """
+
+    tab: str | None = None
+
+
+Command = (
+    FetchCommand
+    | SessionsCreateCommand
+    | SessionsListCommand
+    | SessionsDestroyCommand
+    | BrowserOpenCommand
+    | BrowserCloseCommand
+    | BrowserListCommand
+    | CookiesListCommand
+)
 
 
 def now_ms() -> int:
@@ -168,15 +314,55 @@ def parse_request(payload: Any) -> Command:
     if cmd in (CMD_REQUEST_GET, CMD_REQUEST_POST):
         _reject_unknown_fields(payload, _FETCH_FIELDS)
         return _parse_fetch(payload, cmd)
+    return _parse_command(payload, cmd)
+
+
+def _parse_command(payload: dict[str, Any], cmd: str) -> Command:
+    """Parse a command other than a fetch, which owns its own field set.
+
+    :raises ProtocolError: for unknown fields or malformed values.
+    """
     if cmd == CMD_SESSIONS_CREATE:
         _reject_unknown_fields(payload, _SESSIONS_CREATE_FIELDS)
+        session = _optional_session(payload.get("session"))
+        session_mode = _parse_session_mode(payload.get("sessionMode"))
+        _require_session_for_isolated(session_mode, session)
         return SessionsCreateCommand(
-            session=_optional_session(payload.get("session")),
+            session=session,
             session_ttl_minutes=_parse_ttl(payload.get("session_ttl_minutes")),
+            session_mode=session_mode,
+            proxy=_parse_proxy(payload.get("proxy")),
         )
     if cmd == CMD_SESSIONS_LIST:
         _reject_unknown_fields(payload, _SESSIONS_LIST_FIELDS)
         return SessionsListCommand()
+    if cmd == CMD_BROWSER_OPEN:
+        _reject_unknown_fields(payload, _BROWSER_OPEN_FIELDS)
+        session = _optional_session(payload.get("session"))
+        session_mode = _parse_session_mode(payload.get("sessionMode"))
+        _require_session_for_isolated(session_mode, session)
+        return BrowserOpenCommand(
+            url=_parse_url(payload.get("url")),
+            timeout_ms=_parse_timeout(payload.get("maxTimeout")),
+            session=session,
+            session_mode=session_mode,
+            cookies=_parse_cookies(payload.get("cookies")),
+            new_tab=_parse_bool(payload.get("newTab"), "newTab"),
+            proxy=_parse_proxy(payload.get("proxy")),
+        )
+    if cmd == CMD_BROWSER_CLOSE:
+        _reject_unknown_fields(payload, _BROWSER_CLOSE_FIELDS)
+        return BrowserCloseCommand(tab=_optional_tab(payload.get("tab")))
+    if cmd == CMD_BROWSER_LIST:
+        _reject_unknown_fields(payload, _BROWSER_LIST_FIELDS)
+        return BrowserListCommand(tab=_optional_tab(payload.get("tab")))
+    if cmd == CMD_COOKIES_LIST:
+        _reject_unknown_fields(payload, _COOKIES_LIST_FIELDS)
+        return CookiesListCommand(
+            url=_optional_url(payload.get("url")),
+            proxy=_parse_proxy(payload.get("proxy")),
+            session=_optional_session(payload.get("session")),
+        )
     _reject_unknown_fields(payload, _SESSIONS_DESTROY_FIELDS)
     return SessionsDestroyCommand(session=_required_session(payload.get("session")))
 
@@ -197,6 +383,11 @@ def _parse_fetch(payload: dict[str, Any], cmd: str) -> FetchCommand:
     post_data = _parse_post_data(payload.get("postData"), cmd)
     session = _optional_session(payload.get("session"))
     ttl = _parse_ttl(payload.get("session_ttl_minutes"))
+    session_mode = _parse_session_mode(payload.get("sessionMode"))
+    mode = _parse_execution_mode(payload)
+    timeout_ms = _parse_timeout(payload.get("maxTimeout"))
+    wait_in_seconds = _parse_wait_seconds(payload, timeout_ms)
+    _require_session_for_isolated(session_mode, session)
     if ttl is not None and session is None:
         msg = "session_ttl_minutes requires a session"
         raise ProtocolError(msg, http_status=400)
@@ -204,15 +395,22 @@ def _parse_fetch(payload: dict[str, Any], cmd: str) -> FetchCommand:
     return FetchCommand(
         cmd=cmd,
         url=url,
-        timeout_ms=_parse_timeout(payload.get("maxTimeout")),
+        timeout_ms=timeout_ms,
         session=session,
         session_ttl_minutes=ttl,
+        session_mode=session_mode,
         headers=headers,
         header_scope=header_scope,
         cookies=cookies,
         post_data=post_data,
         return_only_cookies=_parse_bool(payload.get("returnOnlyCookies"), "returnOnlyCookies"),
-        proxy_url=_parse_proxy(payload.get("proxy")),
+        proxy=_parse_proxy(payload.get("proxy")),
+        mode=mode,
+        wait_in_seconds=wait_in_seconds,
+        return_screenshot=_parse_optional_bool(payload, "returnScreenshot"),
+        disable_media=_parse_optional_bool(payload, "disableMedia"),
+        tabs_till_verify=_parse_tabs_till_verify(payload, cmd, mode),
+        solve_captcha=_parse_solve_captcha(payload, cmd, mode),
     )
 
 
@@ -241,6 +439,16 @@ def _parse_url(value: Any) -> str:
     return url
 
 
+def _optional_url(value: Any) -> str | None:
+    """Validate a url that scopes a reply rather than addressing one.
+
+    :raises ProtocolError: when a value is given but is not an http or https url.
+    """
+    if value is None:
+        return None
+    return _parse_url(value)
+
+
 def _parse_bool(value: Any, field_name: str) -> bool:
     if value is None:
         return False
@@ -248,6 +456,84 @@ def _parse_bool(value: Any, field_name: str) -> bool:
         msg = f"{field_name} must be a boolean"
         raise ProtocolError(msg, http_status=400)
     return value
+
+
+def _parse_optional_bool(payload: dict[str, Any], field_name: str) -> bool:
+    """Read an optional strict boolean that defaults to ``False`` when it is omitted.
+
+    An explicit ``null`` is rejected rather than read as the default, matching ``mode``.
+
+    :raises ProtocolError: when a present value is not a boolean.
+    """
+    if field_name not in payload:
+        return False
+    if payload[field_name] is None:
+        msg = f"{field_name} must be a boolean"
+        raise ProtocolError(msg, http_status=400)
+    return _parse_bool(payload[field_name], field_name)
+
+
+def _parse_session_mode(value: Any) -> SessionMode | None:
+    """Validate an optional ``sessionMode`` selector.
+
+    :raises ProtocolError: when the value is not ``shared`` or ``isolated``.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in SESSION_MODES:
+        msg = "sessionMode must be 'shared' or 'isolated'"
+        raise ProtocolError(msg, http_status=400)
+    return cast("SessionMode", value)
+
+
+def _parse_execution_mode(payload: dict[str, Any]) -> ExecutionMode:
+    """Read a fetch's optional ``mode``, which defaults to the browser when it is absent.
+
+    An explicit ``null`` is rejected rather than read as the default, so a caller that means the
+    default omits the field.
+
+    :raises ProtocolError: when a present value is not ``browser``, ``http`` or ``auto``.
+    """
+    if "mode" not in payload:
+        return BROWSER_MODE
+    value = payload["mode"]
+    if not isinstance(value, str) or value not in EXECUTION_MODES:
+        msg = "mode must be 'browser', 'http' or 'auto'"
+        raise ProtocolError(msg, http_status=400)
+    return cast("ExecutionMode", value)
+
+
+def _parse_tabs_till_verify(payload: dict[str, Any], cmd: str, mode: ExecutionMode) -> int | None:
+    """Validate an optional nonnegative Tab count for browser or auto GET."""
+    if "tabs_till_verify" not in payload:
+        return None
+    if cmd != CMD_REQUEST_GET or mode == HTTP_MODE:
+        msg = "explicit verification requires browser or auto GET"
+        raise ProtocolError(msg, http_status=400)
+    value = payload["tabs_till_verify"]
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        msg = "tabs_till_verify must be a nonnegative integer"
+        raise ProtocolError(msg, http_status=400)
+    return value
+
+
+def _parse_solve_captcha(payload: dict[str, Any], cmd: str, mode: ExecutionMode) -> bool:
+    """Enable selected-page CAPTCHA solving only for browser or auto GET."""
+    enabled = _parse_optional_bool(payload, "solveCaptcha")
+    if enabled and (cmd != CMD_REQUEST_GET or mode == HTTP_MODE):
+        msg = "captcha solving requires browser or auto GET"
+        raise ProtocolError(msg, http_status=400)
+    return enabled
+
+
+def _require_session_for_isolated(mode: SessionMode | None, session: str | None) -> None:
+    """Reject an isolated mode with no session id, because a context must be named.
+
+    :raises ProtocolError: when ``isolated`` is asked for without a session.
+    """
+    if mode == ISOLATED_MODE and session is None:
+        msg = "sessionMode 'isolated' requires a session"
+        raise ProtocolError(msg, http_status=400)
 
 
 def _parse_header_scope(value: Any, cmd: str) -> str | None:
@@ -309,28 +595,45 @@ def _parse_post_data(value: Any, cmd: str) -> str | None:
     return None
 
 
-def _parse_proxy(value: Any) -> str | None:
+def _parse_proxy(value: Any) -> ProxySelection | None:
+    """Parse the ``proxy`` field into a configured url or a configured name.
+
+    :raises ProtocolError: when the field is malformed, names both a url and a
+        name, or carries a proxy URL that policy rejects.
+    """
     if value is None:
         return None
     if not isinstance(value, dict):
-        msg = "proxy must be an object with a url"
+        msg = "proxy must be an object with a url or a name"
         raise ProtocolError(msg, http_status=400)
-    unknown = sorted(key for key in value if key != "url")
+    unknown = sorted(key for key in value if key not in _PROXY_FIELDS)
     if unknown:
-        msg = "proxy only supports the url field"
+        msg = "proxy only supports the url and name fields"
         raise ProtocolError(msg, http_status=400)
+    name = value.get("name")
     url = value.get("url")
+    if name is not None and url is not None:
+        msg = "proxy must name either a url or an egress name, not both"
+        raise ProtocolError(msg, http_status=400)
+    if name is not None:
+        if not isinstance(name, str) or not name.strip():
+            msg = "proxy.name must be a non-empty string"
+            raise ProtocolError(msg, http_status=400)
+        return ProxySelection(name=name.strip())
+    if url is None:
+        msg = "proxy must name either a url or an egress name"
+        raise ProtocolError(msg, http_status=400)
     if not isinstance(url, str) or not url.strip():
         msg = "proxy.url must be a non-empty string"
         raise ProtocolError(msg, http_status=400)
-    url = url.strip()
-    error = _classify_proxy_url(url)
+    clean_url = url.strip()
+    error = _classify_proxy_url(clean_url)
     if error is not None:
         raise ProtocolError(error, http_status=400)
-    return url
+    return ProxySelection(url=clean_url)
 
 
-def _classify_proxy_url(url: str) -> str | None:
+def _classify_proxy_url(url: str, *, configured: bool = False) -> str | None:
     """Return a caller-safe error for *url*, or ``None`` when it is a valid proxy URL."""
     try:
         parts = urlsplit(url)
@@ -344,8 +647,34 @@ def _classify_proxy_url(url: str) -> str | None:
     if not host:
         return "proxy url must include a host"
     if userinfo:
-        return "proxy url must not embed credentials; inject credentials at a local hop"
+        if not configured:
+            return "proxy url must not embed credentials; inject credentials at a local hop"
+        return _configured_proxy_auth_error(parts)
     return None
+
+
+def _configured_proxy_auth_error(parts: SplitResult) -> str | None:
+    if parts.scheme.lower() not in {"http", "https"}:
+        return "authenticated proxy must use http or https"
+    if not parts.username or parts.password is None:
+        return "authenticated proxy requires a username and password"
+    try:
+        port = parts.port
+    except ValueError:
+        return "authenticated proxy port is not valid"
+    if port is not None and not 1 <= port <= _MAX_PROXY_PORT:
+        return "authenticated proxy port is not valid"
+    if parts.path or parts.query or parts.fragment:
+        return "authenticated proxy must not include a path, query, or fragment"
+    return None
+
+
+def validate_configured_proxy_url(url: str) -> str:
+    """Validate an operator-configured egress; credentials require the loopback HTTP(S) bridge."""
+    error = _classify_proxy_url(url, configured=True)
+    if error is not None:
+        raise ValueError(error)
+    return url
 
 
 def validate_proxy_url(url: str) -> str:
@@ -366,6 +695,15 @@ def _parse_timeout(value: Any) -> int:
         msg = "maxTimeout must be a finite number of milliseconds"
         raise ProtocolError(msg, http_status=400)
     return int(min(MAX_TIMEOUT_MS, max(MIN_TIMEOUT_MS, value)))
+
+
+def _parse_wait_seconds(payload: dict[str, Any], timeout_ms: int) -> float:
+    """Validate the delay against the unrounded request deadline."""
+    value = payload.get("waitInSeconds", 0.0)
+    if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= timeout_ms / 1000:
+        msg = "waitInSeconds must be a finite number of seconds within maxTimeout"
+        raise ProtocolError(msg, http_status=400)
+    return float(value)
 
 
 def _parse_ttl(value: Any) -> int | None:
@@ -432,6 +770,67 @@ def _required_session(value: Any) -> str:
     return session
 
 
+def _optional_tab(value: Any) -> str | None:
+    """Validate a tab id, which is generated by the service and echoed back by the caller."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        msg = "tab must be a non-empty string"
+        raise ProtocolError(msg, http_status=400)
+    tab = value.strip()
+    if len(tab) > MAX_TAB_ID_LENGTH:
+        msg = f"tab must be at most {MAX_TAB_ID_LENGTH} characters"
+        raise ProtocolError(msg, http_status=400)
+    if not _SESSION_ID_RE.match(tab):
+        msg = "tab may only contain letters, digits, '.', '_', ':', or '-'"
+        raise ProtocolError(msg, http_status=400)
+    return tab
+
+
+def tab_payload(tab: Any) -> dict[str, Any]:
+    """Build the caller-visible description of an interactive tab.
+
+    Only the identity and location of the tab are reported. The egress it leaves through is
+    deliberately omitted, so a response can never disclose a proxy url or its credentials.
+    """
+    return {
+        "id": tab.tab_id,
+        "url": tab.url,
+        "title": tab.title,
+        "status": tab.status_code if isinstance(tab.status_code, int) else 0,
+    }
+
+
+def cookies_payload(cookies: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the ``cookies.list`` reply fragment in the shape the fetch replies use.
+
+    Each cookie keeps the exact object a fetch reports in ``solution.cookies``, so a client
+    reads one cookie shape whether it fetched a page or asked for the profile's cookies.
+    """
+    return {"cookies": [dict(cookie) for cookie in cookies]}
+
+
+def execution_payload(
+    mode: ExecutionMode | None,
+    classification: Classification | None = None,
+) -> dict[str, Any] | None:
+    """Build the additive ``solution.execution`` object, or ``None`` when nothing was reported.
+
+    ``mode`` is the mode the fetch actually ran in and ``classification`` says why its response was
+    answered as it was. Only what the executor reports is included, so a fetch that reports neither
+    leaves the reply exactly as it was.
+    """
+    if mode is None and classification is None:
+        return None
+    execution: dict[str, Any] = {}
+    if mode is not None:
+        execution["mode"] = mode
+    if classification is not None:
+        execution["category"] = classification.category
+        execution["reason"] = classification.reason
+    return execution
+
+
 def solution_payload(  # noqa: PLR0913
     *,
     url: str,
@@ -440,9 +839,18 @@ def solution_payload(  # noqa: PLR0913
     response: str,
     cookies: list[dict[str, Any]],
     user_agent: str,
+    execution: dict[str, Any] | None = None,
+    screenshot: str | None = None,
+    turnstile_token: str | None = None,
+    captcha_provider: str | None = None,
+    captcha_token: str | None = None,
 ) -> dict[str, Any]:
-    """Build the FlareSolverr ``solution`` object."""
-    return {
+    """Build the FlareSolverr ``solution`` object.
+
+    ``execution``, ``screenshot`` and ``turnstile_token`` are optional. Omitting them keeps the
+    object exactly the shape a browser fetch has always reported.
+    """
+    solution = {
         "url": url,
         "status": status_code,
         "headers": headers,
@@ -450,6 +858,16 @@ def solution_payload(  # noqa: PLR0913
         "cookies": cookies,
         "userAgent": user_agent,
     }
+    if execution is not None:
+        solution["execution"] = execution
+    if screenshot is not None:
+        solution["screenshot"] = screenshot
+    if turnstile_token is not None:
+        solution["turnstile_token"] = turnstile_token
+    if captcha_provider is not None and captcha_token is not None:
+        solution["captcha_provider"] = captcha_provider
+        solution["captcha_token"] = captcha_token
+    return solution
 
 
 def ok_response(start: int, *, solution: dict[str, Any] | None = None, message: str = "") -> dict[str, Any]:

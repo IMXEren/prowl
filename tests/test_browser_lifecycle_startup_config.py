@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from pathlib import Path
 from typing import Self, TypedDict, cast
@@ -9,10 +10,11 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from prowl.browser.browser import Browser
+from prowl.browser.config import WINDOW_SIZE_ENV, BrowserConfig, default_window_size
 from prowl.browser.driver import BrowserRuntimeState, DriverRemoteAttachConfig, DriverStartupConfig
 from prowl.browser.exceptions import BrowserStartError
 from prowl.browser.lifecycle import BrowserLifecycle
-from prowl.browser.lifecycle.startup import get_free_port
+from prowl.browser.lifecycle.startup import clear_stale_singleton_files, get_free_port
 
 # ruff: noqa: S108
 
@@ -54,8 +56,13 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         self.driver = _DriverDouble()
         self.lifecycle = BrowserLifecycle(cast("BrowserRuntimeState", self.driver))
 
-    async def _start(self, *, running: bool = False) -> _StartResult:
+    async def _start(self, *, running: bool = False, prime_error: Exception | None = None) -> _StartResult:
         events: list[str] = []
+
+        def record_prime(_args: list[str]) -> None:
+            if prime_error is not None:
+                raise prime_error
+            events.append("prime")
 
         with (
             patch.object(BrowserLifecycle, "unpack_profile", side_effect=lambda: events.append("unpack")),
@@ -63,7 +70,7 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
             patch.object(
                 BrowserLifecycle,
                 "_prime_profile",
-                AsyncMock(side_effect=lambda _args: events.append("prime")),
+                AsyncMock(side_effect=record_prime),
             ),
             patch.object(BrowserLifecycle, "_inject_search_engine", side_effect=lambda: events.append("search")),
             patch(
@@ -99,8 +106,72 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         self.assertEqual(request.cdp_port, 9999)
         self.assertEqual(request.viewport, {"width": 1920, "height": 980})
         self.assertEqual(request.locale, "en-US,en")
-        self.assertEqual(request.launch_arguments, ["--remote-debugging-port=9999", "--window-size=1920,980"])
+        self.assertEqual(
+            request.launch_arguments,
+            ["--remote-debugging-port=9999", "--window-size=1920,980", "--window-position=0,0"],
+        )
         self.assertFalse(hasattr(request, "ws_url"))
+
+    async def test_authenticated_proxy_is_rejected_before_profile_or_launch(self) -> None:
+        self.lifecycle.apply_config(
+            BrowserConfig(proxy_url="socks5h://example:secret@proxy.invalid:10001"),
+            is_running=lambda: False,
+        )
+        with (
+            self.assertRaisesRegex(BrowserStartError, "invalid authenticated browser proxy"),
+            patch.object(BrowserLifecycle, "restore_profile_from_archive") as restore,
+        ):
+            await self._start()
+        restore.assert_not_called()
+        self.driver.start_live.assert_not_awaited()
+
+    async def test_authenticated_http_proxy_launch_uses_only_the_local_bridge(self) -> None:
+        config = BrowserConfig(proxy_url="https://user:secret@proxy.invalid:10001")
+        self.lifecycle.apply_config(config, is_running=lambda: False)
+        result = await self._start()
+        request = cast("DriverStartupConfig", result["request"])
+        flags = [arg for arg in request.launch_arguments if arg.startswith("--proxy-server=")]
+        self.assertEqual(len(flags), 1)
+        self.assertRegex(flags[0], r"^--proxy-server=http://127\.0\.0\.1:\d+$")
+        self.assertNotIn("secret", repr(config) + repr(self.lifecycle) + str(request.launch_arguments))
+        self.assertNotIn("proxy.invalid", str(request.launch_arguments))
+        bridge = self.lifecycle._proxy_bridge
+        self.assertIsNotNone(bridge)
+        with patch.object(BrowserLifecycle, "do_sync_chores_before_exit"):
+            await self.lifecycle._cleanup_resources()
+        self.assertIsNone(self.lifecycle._proxy_bridge)
+        self.assertIsNone(bridge.listen_url if bridge is not None else None)
+
+    async def test_failed_authenticated_profile_priming_releases_the_bridge(self) -> None:
+        self.lifecycle.apply_config(
+            BrowserConfig(proxy_url="https://user:secret@proxy.invalid:10001"), is_running=lambda: False
+        )
+        with self.assertRaisesRegex(RuntimeError, "prime failed"):
+            await self._start(prime_error=RuntimeError("prime failed"))
+        self.assertIsNone(self.lifecycle._proxy_bridge)
+        self.driver.start_live.assert_not_awaited()
+
+    async def test_failed_authenticated_browser_launch_releases_the_bridge(self) -> None:
+        self.lifecycle.apply_config(
+            BrowserConfig(proxy_url="http://user:secret@proxy.invalid:10001"), is_running=lambda: False
+        )
+        self.driver.start_live.side_effect = RuntimeError("test launch failed")
+        with self.assertRaisesRegex(BrowserStartError, "failed to start"):
+            await self._start()
+        self.driver.rollback_start.assert_awaited_once()
+        self.assertIsNone(self.lifecycle._proxy_bridge)
+
+    async def test_input_variation_configured_window_size_replaces_the_fingerprint_size(self) -> None:
+        """A configured window size replaces the fingerprint size, which is a persona value."""
+        self.lifecycle.apply_config(BrowserConfig(window_size=(1590, 860)), is_running=lambda: False)
+
+        result = await self._start()
+        request = cast("DriverStartupConfig", result["request"])
+
+        self.assertEqual(
+            request.launch_arguments,
+            ["--remote-debugging-port=9999", "--window-size=1590,860", "--window-position=0,0"],
+        )
 
     async def test_invariant_websocket_resolution_is_not_done_by_lifecycle(self) -> None:
         """Invariant: lifecycle must let runtime resolve CDP after launching Chrome."""
@@ -215,6 +286,43 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         self.assertEqual(request.ws_url, "wss://cloud.example/devtools/browser/remote")
         self.assertEqual(events, ["signal_cleanup"])
 
+    async def test_state_transition_start_clears_a_stale_profile_claim_before_launching(self) -> None:
+        """State transition: a stale claim is cleared before the profile is primed or launched."""
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = Path(tmp)
+            lock = profile / "SingletonLock"
+            lock.symlink_to("another-container-4242")
+            (profile / "SingletonSocket").write_text("socket", encoding="utf-8")
+            events: list[str] = []
+
+            def _record_claim(directory: str) -> list[str]:
+                events.append("claim")
+                return clear_stale_singleton_files(directory)
+
+            with (
+                patch.object(BrowserLifecycle, "unpack_profile", side_effect=lambda: events.append("unpack")),
+                patch.object(BrowserLifecycle, "webdata_path", return_value=Path("/tmp/missing-web-data")),
+                patch.object(
+                    BrowserLifecycle,
+                    "_prime_profile",
+                    AsyncMock(side_effect=lambda _args: events.append("prime")),
+                ),
+                patch.object(BrowserLifecycle, "_inject_search_engine", side_effect=lambda: events.append("search")),
+                patch("prowl.browser.lifecycle.startup.ensure_binary", side_effect=lambda: events.append("binary")),
+                patch("prowl.browser.lifecycle.startup.get_free_port", return_value=9999),
+                patch("prowl.browser.lifecycle.startup.FingerprintManager", return_value=_fingerprint()),
+                patch.object(BrowserLifecycle, "_register_atexit", side_effect=lambda: events.append("atexit")),
+                patch(
+                    "prowl.browser.lifecycle.startup.clear_stale_singleton_files",
+                    side_effect=_record_claim,
+                ),
+            ):
+                self.lifecycle.profile_dir = str(profile)
+                await self.lifecycle.start(is_running=lambda: False, popup_handler=_noop_popup_handler)
+
+            self.assertFalse(lock.exists() or lock.is_symlink())
+            self.assertLess(events.index("claim"), events.index("prime"))
+
 
 class BrowserLifecycleProfileTests(TestCase):
     """Profile persistence and free-port boundaries."""
@@ -243,3 +351,30 @@ class BrowserLifecycleProfileTests(TestCase):
         port = get_free_port(0)
 
         self.assertGreater(port, 0)
+
+
+class BrowserWindowSizeTests(TestCase):
+    """The launch window size is deployment configuration, so it is parsed once and validated."""
+
+    def test_default_is_unset(self) -> None:
+        """Default: no configured size, so the fingerprint screen size is used."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(WINDOW_SIZE_ENV, None)
+            self.assertIsNone(default_window_size())
+
+    def test_parses_width_by_height(self) -> None:
+        """A configured size is parsed into pixels."""
+        with patch.dict(os.environ, {WINDOW_SIZE_ENV: " 1600x900 "}):
+            self.assertEqual(default_window_size(), (1600, 900))
+
+    def test_rejects_a_malformed_size(self) -> None:
+        """A value that is not WIDTHxHEIGHT fails loudly instead of launching at a wrong size."""
+        for raw in ("1600", "1600x", "x900", "widexhigh", "1600x900x2"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {WINDOW_SIZE_ENV: raw}), self.assertRaises(ValueError):
+                default_window_size()
+
+    def test_rejects_non_positive_pixels(self) -> None:
+        """Zero or negative pixels are refused."""
+        for raw in ("0x900", "1600x0"):
+            with self.subTest(raw=raw), patch.dict(os.environ, {WINDOW_SIZE_ENV: raw}), self.assertRaises(ValueError):
+                default_window_size()

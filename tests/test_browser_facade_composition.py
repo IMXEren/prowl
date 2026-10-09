@@ -123,7 +123,12 @@ class BrowserFacadeCreateTests(IsolatedAsyncioTestCase):
         self.assertIs(created, group)
         runtime.create_tab_group.assert_awaited_once()
         args = runtime.create_tab_group.await_args.args
-        self.assertIs(args[0], TabGroup)
+        # The factory the runtime receives must build a group owned by the class that asked for
+        # it, which is what keeps an egress browser's groups out of the default runtime.
+        self.assertTrue(callable(args[0]))
+        bound = args[0]("target", 7)
+        self.assertIsInstance(bound, TabGroup)
+        self.assertIs(bound._owner, Browser)
         self.assertTrue(callable(args[1]))
         self.assertTrue(callable(args[2]))
 

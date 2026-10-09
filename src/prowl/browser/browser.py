@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING, ClassVar, Self
 
 from loguru import logger
 
 from prowl.browser.driver.runtime import BrowserRuntimeState, resolve_cdp_ws_url
-from prowl.browser.exceptions import BrowserError, BrowserStartError, BrowserTabError
+from prowl.browser.exceptions import BrowserContextError, BrowserError, BrowserStartError, BrowserTabError
 from prowl.browser.lifecycle.startup import BrowserLifecycle, BrowserShutdownState
 
 if TYPE_CHECKING:
@@ -17,10 +18,12 @@ if TYPE_CHECKING:
     from playwright.async_api import Browser as PWBrowser
     from playwright.async_api import BrowserContext as PWBrowserCtx
     from playwright.async_api import Page as PWPage
+    from playwright.async_api import StorageState
     from pydoll.browser import Chrome
     from pydoll.browser.tab import Tab as PDTab
 
     from prowl.browser.config import BrowserConfig
+    from prowl.browser.driver.contexts import BrowserContextHandle
     from prowl.browser.fingerprint import FingerprintManager
 
 
@@ -53,11 +56,22 @@ class Browser:
         """Adopt explicit launch configuration before the browser starts.
 
         The proxy URL is never logged. Refuses to reconfigure a running or
-        shutting-down browser.
+        shutting-down browser, and rejects a context cap below one before any
+        configuration is mutated.
 
-        :raises BrowserStartError: when the browser is running or shutting down.
+        :raises BrowserStartError: when the browser is running or shutting down, or when
+            the context cap is below one.
         """
+        if config.max_contexts < 1:
+            msg = f"BrowserConfig.max_contexts must be at least 1, got {config.max_contexts!r}."
+            raise BrowserStartError(msg)
         cls._lifecycle.apply_config(config, is_running=cls.is_running)
+        cls._runtime.contexts.configure_limit(config.max_contexts)
+
+    @classmethod
+    def proxy_url(cls: type[Self]) -> str | None:
+        """Return the proxy configured for this identity."""
+        return cls._lifecycle.proxy_url
 
     @classmethod
     def _webdata_path(cls: type[Self]) -> Path:
@@ -148,21 +162,98 @@ class Browser:
         )
 
     @classmethod
-    async def create(cls: type[Self]) -> TabGroup:
+    async def get_context(
+        cls: type[Self],
+        session_id: str | None = None,
+        *,
+        storage_state: StorageState | None = None,
+    ) -> BrowserContextHandle:
+        """Return this browser's context handle for *session_id*.
+
+        ``None`` returns the shared persistent context, which carries the browsing state
+        every request already inherits. A session id returns a long-lived isolated context
+        in the same browser process, created on first use and reused afterwards, so a
+        session keeps its own cookies and storage on the same device identity.
+        *storage_state* seeds a newly created isolated context through Playwright's native
+        restore; the shared persistent context never accepts it, and a live session handle
+        keeps its own state because reuse never calls the factory again.
+
+        :raises BrowserStartError: when the browser is shutting down or cannot start.
+        :raises BrowserContextError: when the session id cannot name a context, or when
+            storage state is supplied for the shared persistent context.
+        """
+        if session_id is None:
+            if storage_state is not None:
+                msg = "The shared persistent context does not accept supplied storage state."
+                raise BrowserContextError(msg)
+            return cls._runtime.shared_context()
+        if cls._lifecycle.shutdown_state is BrowserShutdownState.IN_PROGRESS:
+            msg = "Browser is shutting down - cannot create new contexts."
+            raise BrowserStartError(msg)
+        if not cls.is_running():
+            await cls.start()
+        if storage_state is None:
+            return await cls._runtime.isolated_context(session_id)
+        return await cls._runtime.isolated_context(session_id, storage_state=storage_state)
+
+    @classmethod
+    async def close_context(cls: type[Self], session_id: str, *, evicted: bool = False) -> None:
+        """Close this browser's isolated context for *session_id*.
+
+        Idempotent: closing an unknown session is a no-op. The shared persistent context is
+        never closed here. *evicted* marks automatic cleanup retiring the context rather than
+        an explicit caller close; only evictions are counted in :meth:`resource_metrics`.
+
+        :raises BrowserContextError: when the session id cannot name a context.
+        """
+        if evicted:
+            await cls._runtime.close_isolated_context(session_id, evicted=True)
+        else:
+            await cls._runtime.close_isolated_context(session_id)
+
+    @classmethod
+    def resource_metrics(cls: type[Self]) -> dict[str, int]:
+        """Return this identity's native resource counters as a plain integer snapshot.
+
+        The cumulative counters survive browser generations of this identity class and the
+        gauges describe what it currently owns. The snapshot reads driver and lifecycle state
+        only, so it never probes the live browser, takes a lock or labels an identity.
+        """
+        contexts = cls._runtime.contexts
+        return {
+            "context_count": contexts.count,
+            "context_created_total": contexts.context_created_total,
+            "context_evicted_total": contexts.context_evicted_total,
+            "browser_restart_total": cls._lifecycle.browser_restart_total,
+            "tabgroups_active": len(cls._runtime.active_groups),
+        }
+
+    @classmethod
+    async def create(cls: type[Self], context: BrowserContextHandle | None = None) -> TabGroup:
         """Create a new :class:`TabGroup` in the shared browser process.
 
         Acquires a semaphore slot (max *MAX_GROUPS* concurrent groups).
-        Starts the browser automatically if not already running.
+        Starts the browser automatically if not already running. *context* selects the
+        browser context the group's pages are created in; the default is the shared
+        persistent context.
 
         :raises BrowserStartError: if the browser is shutting down
             or group creation fails.
+        :raises BrowserContextError: when *context* is not this browser's own context.
         """
         if cls._lifecycle.shutdown_state is BrowserShutdownState.IN_PROGRESS:
             msg = "Browser is shutting down - cannot create new tab groups."
             raise BrowserStartError(msg)
 
         try:
-            instance = await cls._runtime.create_tab_group(TabGroup, cls.start, cls.is_running)
+            # The group has to belong to the class that created it. A tab group resolves its
+            # tabs through its owner, so a group made through an egress browser subclass must
+            # bind to that subclass, or its tabs are looked up in the default browser's runtime
+            # where they do not exist.
+            group_factory = partial(TabGroup, owner=cls)
+            instance = await cls._runtime.create_tab_group(group_factory, cls.start, cls.is_running, context)
+        except BrowserContextError:
+            raise
         except Exception as e:
             msg = f"Failed to start the browser due to {e}"
             raise BrowserStartError(msg) from e
@@ -171,17 +262,17 @@ class Browser:
 
     @classmethod
     async def _create_from_running(cls: type[Self]) -> TabGroup:
-        """Create a tab group in the running browser."""
-        return await cls._runtime.create_group(TabGroup)
+        """Create a tab group in the running browser, bound to *cls* as its owner."""
+        return await cls._runtime.create_group(partial(TabGroup, owner=cls))
 
     @classmethod
-    async def _new_page(cls: type[Self]) -> tuple[str, PWPage]:
-        """Create a new tab using PW and add it to page map."""
+    async def _new_page(cls: type[Self], context: BrowserContextHandle | None = None) -> tuple[str, PWPage]:
+        """Create a new tab using PW in *context* and add it to page map."""
         if cls._lifecycle.shutdown_state is BrowserShutdownState.IN_PROGRESS:
             msg = "Browser is shutting down - cannot create new pages."
             raise BrowserTabError(msg)
 
-        return await cls._runtime.create_page()
+        return await cls._runtime.create_page(context)
 
     @classmethod
     def _add_tab_to_pd(cls: type[Self], target_id: str) -> PDTab:
@@ -231,6 +322,11 @@ class Browser:
         await cls._lifecycle.shutdown()
 
     @classmethod
+    async def retry_shutdown(cls: type[Self]) -> None:
+        """Retry a failed browser cleanup via lifecycle."""
+        await cls._lifecycle.retry_shutdown()
+
+    @classmethod
     async def finally_cleanup(cls: type[Self], tg: TabGroup | None = None) -> None:
         """As the name suggests, use in finally blocks to quit as well as shutdown the Browser."""
         if tg is not None:
@@ -254,46 +350,77 @@ class Browser:
 class TabGroup:
     """Instance-level tab group.
 
-    Represents a group of tabs (1 parent + n children) within the shared browser process.
-    Created via Browser.create(). Holds per-group state and delegates to Browser classmethods
-    for browser-level operations.
+    Represents a group of tabs (1 parent + n children) within one browser process.
+    Created via ``owner.create()``. Holds per-group state and delegates to its
+    owner, which is :class:`Browser` for the process-wide egress and an egress
+    subclass of it for a named egress, so a group always belongs to exactly one
+    browser process.
     """
 
-    def __init__(self: Self, target_id: str, gid: int) -> None:
+    def __init__(
+        self: Self,
+        target_id: str,
+        gid: int,
+        owner: type[Browser] | None = None,
+        context: BrowserContextHandle | None = None,
+    ) -> None:
         """Initialize tab group with a parent tab.
 
-        Private constructor. Always use Browser.create() to instantiate.
+        Private constructor. Always use ``owner.create()`` to instantiate.
+        *context* is the browser context the group's pages are created in; the owning
+        runtime binds it at creation, and the shared persistent context is used otherwise.
         """
         self.gid: int = gid
         self.target_id: str = target_id
+        self._owner: type[Browser] = owner if owner is not None else Browser
+        self._context: BrowserContextHandle | None = context
         self.child_target_ids: list[str] = []
         self._lock: asyncio.Lock = asyncio.Lock()
         self._quitting: bool = False
+
+    def bind_context(self: Self, context: BrowserContextHandle) -> None:
+        """Bind this group to the browser context its pages are created in."""
+        self._context = context
+
+    @property
+    def context(self: Self) -> BrowserContextHandle:
+        """The browser context this group's pages live in."""
+        if self._context is None:
+            self._context = self._owner._runtime.shared_context()  # noqa: SLF001
+        return self._context
 
     def __repr__(self: Self) -> str:
         """Return a human-readable representation of the tab group."""
         return f"<TabGroup #{self.gid} ({len(self.child_target_ids)} children)>"
 
     def pd(self: Self) -> Chrome:
-        """Delegates to Browser.pd()."""
-        return Browser.pd()
+        """Delegates to the owning browser's pd()."""
+        return self._owner.pd()
 
     @property
     def fp(self: Self) -> FingerprintManager:
         """Delegates to Browser lifecycle fingerprint state."""
-        fp = Browser._lifecycle.fingerprint  # noqa: SLF001
+        fp = self._owner._lifecycle.fingerprint  # noqa: SLF001
         if fp is None:
-            msg = "Browser fingerprint is not configured - call Browser.start() first."
+            msg = "Browser fingerprint is not configured - call start() first."
             raise BrowserError(msg)
         return fp
 
     async def new_tab(self: Self) -> PDTab:
-        """Spawns a dependent sub-tab and links it to this tab group."""
-        target_id, page = await Browser._new_page()  # noqa: SLF001
-        Browser._runtime.attach_page_to_group(page, self)  # noqa: SLF001
+        """Spawns a dependent sub-tab in this group's context and links it to this tab group."""
         async with self._lock:
+            if self._quitting:
+                msg = "Tab group is closing - cannot create new pages."
+                raise BrowserTabError(msg)
+            target_id, page = await self._owner._new_page(self.context)  # noqa: SLF001
+            if self._quitting:
+                await page.close()
+                self._owner._runtime._forget_target(target_id, page)  # noqa: SLF001
+                msg = "Tab group closed while creating a page."
+                raise BrowserTabError(msg)
+            self._owner._runtime.attach_page_to_group(page, self)  # noqa: SLF001
             self.child_target_ids.append(target_id)
-        tab = await Browser.get_pd_tab(target_id)
+        tab = await self._owner.get_pd_tab(target_id)
         if tab is None:
             msg = f"Failed to resolve newly created tab {target_id} in group #{self.gid}."
             raise BrowserTabError(msg)
@@ -302,7 +429,7 @@ class TabGroup:
     @property
     def ppage(self: Self) -> PWPage:
         """Access to the parent Playwright Page for this group."""
-        page = Browser._runtime.target_to_page_map.get(self.target_id)  # noqa: SLF001
+        page = self._owner._runtime.target_to_page_map.get(self.target_id)  # noqa: SLF001
         if page is None:
             msg = f"Parent page {self.target_id} in group #{self.gid} is no longer available."
             raise BrowserTabError(msg)
@@ -311,7 +438,7 @@ class TabGroup:
     @property
     async def ptab(self: Self) -> PDTab:
         """Access to the parent Pydoll Tab for this group."""
-        tab = await Browser.get_pd_tab(self.target_id)
+        tab = await self._owner.get_pd_tab(self.target_id)
         if tab is None:
             msg = f"Parent tab {self.target_id} in group #{self.gid} is no longer available."
             raise BrowserTabError(msg)
@@ -324,8 +451,8 @@ class TabGroup:
         via :meth:`quit`. Child tabs are closed individually and removed
         from the child list.
         """
-        await Browser._runtime.close_group_target(self, target_id)  # noqa: SLF001
+        await self._owner._runtime.close_group_target(self, target_id)  # noqa: SLF001
 
     async def quit(self: Self) -> None:
         """Tears down all pages linked to this tab group and returns the pool slot."""
-        await Browser._runtime.close_group(self)  # noqa: SLF001
+        await self._owner._runtime.close_group(self)  # noqa: SLF001

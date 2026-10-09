@@ -13,7 +13,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import patch
 
-from prowl.browser.site import Source
+from prowl.browser.page_handler import PageResponse
 from prowl.service import backend as backend_module
 from prowl.service.backend import BrowserBackend, FetchRequest, _normalize_cookies
 
@@ -82,9 +82,9 @@ class FakeBrowser:
 
 
 class FakeSite:
-    """Fake Site recording get/post calls with optional concurrency tracking."""
+    """Fake PageHandler recording get/post calls with optional concurrency tracking."""
 
-    def __init__(self, source: Source, *, delay: float = 0.0, error: BaseException | None = None) -> None:
+    def __init__(self, source: PageResponse, *, delay: float = 0.0, error: BaseException | None = None) -> None:
         self.source = source
         self.delay = delay
         self.error = error
@@ -93,7 +93,7 @@ class FakeSite:
         self.active = 0
         self.max_active = 0
 
-    async def _run(self) -> Source:
+    async def _run(self) -> PageResponse:
         self.active += 1
         self.max_active = max(self.max_active, self.active)
         try:
@@ -112,7 +112,7 @@ class FakeSite:
         *,
         headers: dict[str, str] | None = None,
         header_scope: str | None = None,
-    ) -> Source:
+    ) -> PageResponse:
         self.get_calls.append((url, timeout, headers, header_scope))
         return await self._run()
 
@@ -123,13 +123,13 @@ class FakeSite:
         *,
         post_data: str = "",
         headers: dict[str, str] | None = None,
-    ) -> Source:
+    ) -> PageResponse:
         self.post_calls.append((url, timeout, post_data, headers))
         return await self._run()
 
 
-def _source() -> Source:
-    return Source(
+def _source() -> PageResponse:
+    return PageResponse(
         source="<html><body>ok</body></html>",
         status_code=200,
         headers={"content-type": "text/html"},
@@ -151,7 +151,7 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         backend = BrowserBackend()
         patchers = [
             patch.object(backend_module, "Browser", browser),
-            patch.object(backend_module, "resolve_site", lambda _group, _url: site),
+            patch.object(backend_module, "resolve_page_handler", lambda _group, _url: site),
         ]
         for patcher in patchers:
             patcher.start()

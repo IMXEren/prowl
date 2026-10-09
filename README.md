@@ -14,7 +14,7 @@ One repository owns the whole stack:
 src/prowl/
   browser/            reusable core (extracted code, behaviour preserved)
     browser.py        Browser process manager + TabGroup
-    site.py           Site/Source, challenge handling, DOM tree building, POST fetch
+    page_handler.py   PageHandler/PageResponse, challenge handling, DOM tree building, POST fetch
     cookies.py        cookie persistence helpers
     driver/           concrete Playwright + pydoll driver ownership
     lifecycle/        startup, profile warm/pack, shutdown state machine
@@ -33,65 +33,213 @@ browser `POST` path, and the generic signal coordinator moved from `src/signals.
 
 ## Profiles are persistent trust assets
 
-The browser runs from one persistent Chrome profile directory (`PROWL_PROFILE_DIR`,
-`/state/profile` in Docker), packed on shutdown into `PROWL_PROFILE_ARCHIVE`
-(`/state/browser-profile.zip` in Docker) on the same writable `prowl-state` volume.
-Cookies, storage, login state, and site reputation can be bound to that profile and to
-the browser fingerprint, so the profile is a long-lived asset rather than scratch state:
+The default egress's browser runs from the configured persistent Chrome profile directory
+(`PROWL_PROFILE_DIR`, `/state/profile` in Docker), packed on shutdown into
+`PROWL_PROFILE_ARCHIVE` (`/state/browser-profile.zip` in Docker) on the same writable
+`prowl-state` volume. Each egress named in `PROWL_EGRESSES` gets its own browser with its own
+profile directory beside that one (`/state/profile-<name>`) and its own archive beside that one
+(`/state/browser-profile-<name>.zip`). Profile trees and archives are checked for cross-identity
+collisions at configuration time. Existing nested profiles require an owner-run migration with
+Prowl stopped before using this layout; see [profile ownership](docs/identity-profiles.md).
+Cookies, storage, login state, and site reputation can be bound to a profile and to
+the browser fingerprint, so a profile is a long-lived asset rather than scratch state:
 
 * On startup the profile is restored from `PROWL_PROFILE_ARCHIVE` when present, otherwise it
   is primed headlessly once and the search engine is injected.
 * On shutdown the profile is packed back to the archive, skipping caches and journals.
 * Warm the profile once against the target site; later requests reuse the established trust.
 
-## One shared profile; logical sessions are names, not profiles
+## Logical sessions: shared by default, isolated on request
 
-The service keeps a single browser process and a single persistent profile. A logical
-session (`sessions.create`, or a `session` name on a request) is only a name with an
-optional TTL plus a serialization lock over that same shared profile. Sessions share
-cookies and trust, and an idle session retains **no** tab group and consumes no browser
-capacity. Every fetch creates a fresh tab group, runs inside it, and closes it on
-success, error, and cancellation. Do not present sessions as isolation.
+The service keeps one browser process and one persistent profile per egress. A logical
+session (`sessions.create`, or a `session` name on a request) is a name with an optional TTL
+and a serialization lock. By default it is **shared**: it uses the egress's one persistent
+profile, so sessions on the same egress share cookies and trust, and an idle session retains
+**no** tab group and consumes no browser capacity. Every fetch creates a fresh tab group, runs
+inside it, and closes it on success, error, and cancellation.
 
-`PROWL_MAX_SESSIONS` bounds how many logical sessions may exist at once;
-exceeding it returns a deterministic caller-safe error. `session_ttl_minutes` on
-`sessions.create` or a request sets an expiry that is enforced lazily and refreshed on
-each use; `sessions.list` omits expired sessions.
+An opt-in `sessionMode: isolated` gives the session its own browser context beside the
+persistent one, inside the same browser process. That context keeps its own cookies,
+`localStorage`, IndexedDB, and permissions while staying on the same device identity, because
+fingerprint, proxy, locale, and timezone are process-wide launch properties rather than
+per-context overrides. By default, isolated state lives only as long as its context: created
+on first use and discarded on destruction, expiry or browser-process loss.
+
+`sessionMode` may be set on `sessions.create`, `request.get`/`request.post`, and `browser.open`,
+so a named session can be created isolated and later reused by its id. An isolated session
+requires a session id, and a session's mode is fixed once it exists: asking for a different mode,
+or a different egress, for an existing session fails instead of silently changing it. A shared
+session that never named an egress binds the default egress on first use, and a request that
+names an egress binds it for the session's life.
+
+`PROWL_MAX_CONTEXTS` defaults to 8 per browser identity: one shared persistent context
+and up to seven isolated sessions. `PROWL_MAX_SESSIONS` additionally bounds logical session
+metadata. Admission may evict an eligible idle session through its cleanup fence; active and
+queued leases are never evicted. Closing or failed-cleanup generations retain their slots.
+If no eligible victim exists, admission returns a caller-safe limit error.
+New isolated sessions default to a 60-minute idle TTL (`PROWL_SESSION_TTL_MINUTES`).
+Shared sessions without an explicit TTL remain unlimited. `session_ttl_minutes` on
+`sessions.create` or a request overrides the default. Omitted refreshes preserve an existing
+TTL; its idle countdown restarts after the final active/queued lease drains. Expiry cleanup
+runs periodically and on access; `sessions.list` omits expired sessions.
+
+### Optional isolated state persistence
+
+Set `PROWL_SESSION_STATE_DIR` to an operator-owned private directory to retain native cookies,
+`localStorage` and IndexedDB on eviction or orderly shutdown. Recreating the same isolated
+session ID on the same named identity restores its last saved snapshot. Explicit
+`sessions.destroy` deletes that binding's snapshot. Persistence is disabled by default.
+
+Snapshots contain sensitive plaintext browsing data. Keep the directory outside source control
+with private filesystem permissions/ACLs. This is not a full profile, permissions/persona backup
+or session-registry recovery. Live contexts remain authoritative; crash recovery can restore only
+an earlier saved snapshot, not unflushed changes. Injected custom backends manage their own storage.
 
 ## Concurrency
 
-* `PROWL_MAX_CONCURRENCY` bounds how many fetches run at once (default `1`: this
-  stack intentionally owns one persistent trust profile and one free browser session).
+* `PROWL_MAX_CONCURRENCY` bounds how many browser operations run at once: a fetch, a
+  `browser.open`, and a `cookies.list` each take a slot. It is also the capacity at which an open
+  interactive tab may be taken over, so open tabs and in-flight operations count together against
+  it (default `1`: this stack intentionally owns one persistent trust profile and one free browser
+  session).
+* Interactive takeover considers only the requested identity's tabs and in-flight work, and
+  never closes that identity's last tab. Other egresses do not cause a takeover.
 * Each logical session has its own lock, so per-session work is serialized.
-* Anonymous (session-less) requests are serialized against each other.
+* Anonymous (session-less) requests are serialized against each other within their egress.
 * Each request runs under a deadline derived from `maxTimeout` plus a small cleanup slack;
   every fetch closes its tab group on every path, including cancellation.
 
+## Metrics and recovery
+
+`GET /metrics` serves Prometheus text under the same access policy as `/v1`. It exposes
+aggregate request/HTTP/escalation/challenge counters, context and group gauges, and cumulative
+context creation/automatic eviction/restart counters. Timing summaries provide `_count` and
+`_sum` for request duration and TabGroup acquisition. Scraping does not launch a browser.
+There are no URL, session, identity or proxy labels; custom backends without metrics return 501.
+
+Owned browser crashes are recovered before subsequent requests without replaying failed work.
+Existing nonempty profile directories take precedence over archives. Persisted shared state
+survives; isolated contexts are recreated empty unless optional persistence supplies a prior
+snapshot, and stale interactive tabs are retired.
+Unflushed writes are not guaranteed to survive a crash. Disconnected remote attachments require
+explicit reconnect. Failed native cleanup retains ownership and exposes an explicit
+`Browser.retry_shutdown()` operation rather than silently admitting a replacement.
+
+## Forward proxy
+
+Set `PROWL_FORWARD_PROXY_PORT` to enable an additional HTTP/1 forward-proxy listener on
+`PROWL_HOST`. It is disabled by default, uses the shared default browser identity, and shares
+service admission and cookie state. Restrict access with your network policy: there is no
+separate proxy authentication. Containers also need the chosen port published explicitly.
+
+For HTTPS CONNECT interception, supply `PROWL_PROXY_CA_CERT` and `PROWL_PROXY_CA_KEY` together:
+a PEM signing CA and its matching unencrypted private key. Keep the key private. Clients must
+explicitly trust this CA; Prowl never installs certificates or changes machine trust. Without
+a CA, CONNECT returns 501 rather than opening a raw tunnel.
+
+```sh
+curl --proxy http://127.0.0.1:8192 --cacert /private/proxy-ca.pem https://example.com/
+```
+
+GET uses automatic HTTP/browser routing. POST forwards exact bytes through explicit HTTP only,
+without browser replay. Encoded request bodies are rejected. Responses carry
+`X-Prowl-Representation: origin` for decoded HTTP entity bytes or `rendered` for browser DOM
+HTML; this is not a transparent transfer of compressed origin bytes. Hop-by-hop and stale
+representation headers are removed, with repeated supported headers preserved. Each connection
+serves one request and closes; intercepted requests cannot escape the CONNECT authority.
+
 ## Egress / proxy
 
-One browser and one profile have exactly one egress. `PROWL_PROXY_URL` configures
-that egress process-wide and is passed to CloakBrowser as `--proxy-server` (the URL is
-never logged). A request may include `proxy.url` only when it exactly matches the configured
-process proxy; any absent or mismatched configuration is rejected deterministically. Proxy
-credentials are never included in responses or logs. For authenticated upstreams, point
-`PROWL_PROXY_URL` at a local credential-injecting proxy. A proxy URL that embeds
-credentials (`user:pass@`) is rejected, so a configured or request proxy is always an
-authenticated-free hop; put the credential injection at that local hop instead.
+One browser and one profile have exactly one egress. `PROWL_PROXY_URL` configures the
+process-wide egress, named `default`. Unauthenticated URLs become Chromium proxy
+arguments; authenticated HTTP(S) upstreams use a private loopback bridge, so Chromium
+receives only a credential-free local proxy argument.
+
+`PROWL_EGRESSES` adds more egresses as a comma separated `name=url` list, for example
+`PROWL_EGRESSES=one=http://127.0.0.1:8081,two=http://127.0.0.1:8082`. Each named
+egress owns its own browser process, profile directory, and profile archive, so it keeps
+its own warm trust, cookies, and clearance. Names are limited to letters, digits, dot,
+dash, and underscore, because they become path components, and `default` is reserved for
+`PROWL_PROXY_URL`.
+
+A request selects an egress with `proxy`:
+
+* `proxy.url` retains its FlareSolverr-compatible meaning for credential-free configured
+  egress URLs only. Caller-supplied URLs containing credentials are always rejected.
+* `proxy.name` selects one configured egress by name, including an authenticated upstream
+  whose credentials are supplied privately by the operator.
+
+The same `proxy` selector binds a `sessions.create` (or the first request naming that session)
+to one egress. A session on one egress is never silently served by another: a later request
+naming a different egress fails.
+
+Anything else is rejected deterministically, and an unlisted URL or an unknown name is
+reported without echoing a URL. A named egress browser starts on first use and is shut down
+after `PROWL_EGRESS_IDLE_SECONDS` without work (default `300`), so an egress nothing is using
+costs no memory. A logical session is bound to the egress of its first use, so a request
+naming a different egress for the same session fails instead of silently mixing the two.
+
+Authenticated HTTP(S) upstream credentials remain in the browser identity's process memory.
+The loopback bridge injects proxy authentication upstream and tunnels HTTPS without
+intercepting TLS or changing browser trust. It binds only to `127.0.0.1`, closes with its
+owning browser, and does not include the upstream URL in Chromium arguments or responses.
+Authenticated SOCKS is not supported. Select authenticated egresses with `proxy.name`;
+never send their credentials in a request. Do not put credential-bearing operator settings
+in tracked files.
 
 ## HTTP API (FlareSolverr v1 subset)
 
-`POST /v1` with a JSON body:
+`POST /v1` with a JSON body. Command responses include a generated `X-Request-ID` that
+correlates service logs; inbound values are ignored. Response JSON is unchanged.
 
 | cmd | fields |
 | --- | --- |
-| `request.get` | `url`, `maxTimeout`, `session`, `session_ttl_minutes`, `headers`, `headerScope`, `cookies`, `returnOnlyCookies`, `proxy` |
-| `request.post` | as `request.get` except `headerScope`, plus `postData` (string, or object sent as JSON) |
-| `sessions.create` | optional `session` name, optional `session_ttl_minutes` |
-| `sessions.list` | — |
+| `request.get` | `url`, `maxTimeout`, `session`, `session_ttl_minutes`, `sessionMode`, `mode`, `headers`, `headerScope`, `cookies`, `returnOnlyCookies`, `waitInSeconds`, `returnScreenshot`, `disableMedia`, `tabs_till_verify`, `proxy` |
+| `request.post` | as `request.get` except `headerScope` and `tabs_till_verify`, plus `postData` (string, or object sent as JSON) |
+| `sessions.create` | optional `session` name, optional `session_ttl_minutes`, optional `sessionMode` (`shared` or `isolated`), optional `proxy` |
+| `sessions.list` | none |
 | `sessions.destroy` | `session` |
+| `browser.open` | `url`, optional `maxTimeout`, `session`, optional `sessionMode`, `cookies` (installed before the navigation), optional `newTab` (a second tab for a url already open), `proxy` |
+| `browser.close` | optional `tab`; without it every interactive tab is closed |
+| `browser.list` | optional `tab`; refreshing only the named tab keeps it alive |
+| `cookies.list` | optional `url` (only the cookies the browser would send there), optional `session` (read that session's own context), `proxy` |
+
+Fetches accept `mode: browser|http|auto`; omitted means `browser`. `http` uses an
+identity-matched HTTP client and never escalates. `auto` tries HTTP for GETs and uses the
+selected browser context for explicit challenges or unsupported HTTP identity/cookie
+semantics. Auto POST goes directly to the browser, preventing speculative replay.
+HTTP and browser requests share the selected context's cookie state and fixed proxy.
+Routed responses include execution mode and classification diagnostics; a browser retry
+is not a guarantee that a challenge was solved.
+
+HTTP currently supports verified native identity profiles and the verified default English
+language case. Uncaptured language variants, partitioned/SameParty cookies, overlapping
+host-only/domain cookie scopes and unsupported cross-site redirect cookie semantics fail
+closed. Use browser mode when those semantics are needed.
 
 Unknown fields are rejected rather than ignored. A GET without custom headers leaves all
-headers under browser control. Custom GET headers require an explicit `headerScope`:
+headers under browser control. `waitInSeconds` accepts a nonnegative numeric delay within
+`maxTimeout`; `returnScreenshot` adds a Base64 PNG in `solution.screenshot`. Both require
+browser execution: `auto` selects the browser directly, and explicit `http` rejects them.
+`returnOnlyCookies` skips the delay but keeps a requested screenshot. Enabled POST capture
+renders its already-fetched body locally without resending the POST. Original response
+status and headers remain the initial fetch metadata.
+
+`disableMedia` is a boolean that blocks page-routed image, stylesheet and font requests
+for this fetch only. It selects browser execution in `auto` and is rejected by explicit
+`http`. Audio/video are unaffected. Service-worker-handled requests can bypass page
+routing; this option does not disable or modify service workers.
+
+`tabs_till_verify` is an optional nonnegative integer for browser/auto GET. It
+activates the owned Cloudflare solver before navigation and checks for a widget token.
+If needed, it clicks a unique native checkbox in a Cloudflare iframe belonging to the
+selected page and browser context; otherwise it falls back to the requested number
+of Tab presses and Space. Zero still enables verification. The response includes
+`solution.turnstile_token` only for a confirmed widget response or a changed nonempty
+input. HTTP/POST reject this option; `returnOnlyCookies` retains the token. The
+original deadline bounds interaction. PageHandler behavior can still reject a challenge.
+
+Custom GET headers require an explicit `headerScope`:
 `document` applies them only to the initial main-frame navigation, while `origin` applies
 them only to requests with the target URL's exact scheme, host, and effective port. Neither
 scope sends headers to redirects on another origin, subdomains, or third-party resources.
@@ -155,6 +303,82 @@ curl -s http://127.0.0.1:8191/v1 -H 'Content-Type: application/json' -d '{
   "session": "example"
 }' | jq '.solution.cookies'
 ```
+
+## Interactive browser tabs
+
+A fetch closes its tab group when it returns, so nothing stays on screen. An interactive tab is
+the other case: it is opened, navigated, and left open, so a person can watch and drive it on
+the headed browser's X display, for example over VNC.
+
+`browser.open` returns the tab's `id`, `url`, `title` and `status`. The egress is never part of
+a response, so a reply cannot disclose a proxy url.
+
+Opening a url that is already open on that egress does not open a second tab: the existing tab is
+handed back unchanged with `reused: true` and the message `Tab reused`, and only its idle
+countdown is refreshed. That is what stops a caller whose own request timed out from leaving a
+tab nobody can close by asking again. `newTab: true` overrides the reuse and forces a second tab
+for the same url.
+
+An interactive tab runs in the egress's own browser, and therefore shares that egress's profile
+directory and profile archive with its fetches. That is deliberate: a Cloudflare clearance
+earned by a person clicking through a challenge is bound to the address that solved it, so it
+has to be the clearance the fetches then use. While a tab is open the egress is held, so the
+idle pool cannot shut that browser down underneath it.
+
+Tabs share the profile, not the work. A fetch still runs in its own transient tab group, so an
+open tab does not block fetches and a fetch never closes an open tab. Anonymous `browser.open`
+calls serialize per egress, like anonymous fetches, because they touch the one profile.
+
+An isolated session's tab opens in that session's own context instead of the shared profile, and
+tab reuse is scoped to the session and its context: a `browser.open` never hands back a shared or
+another session's tab. Destroying or expiring the session closes its tabs and its context, while
+the persistent profile and every shared tab are left alone.
+
+A tab is kept until it is closed. Set `PROWL_INTERACTIVE_IDLE_SECONDS` to a positive number of
+seconds to close one that has gone untouched for that long; `browser.list` refreshes the
+countdown only for the `tab` it names, so a client displaying one tab keeps that tab open
+without holding every other forgotten tab alive. Unset or `0` disables the timeout.
+
+A caller that loses track of its tabs cannot crowd out the fetch path. When open tabs and
+in-flight operations together reach `PROWL_MAX_CONCURRENCY` and a fetch or a new tab is about to
+run, the least recently used tab is taken over first, but never the only one: a lone tab is always
+left alone because it is the one most likely being watched. `browser.list` refreshes the position
+of the named `tab`, so a client displaying a tab protects it from takeover. This is on by default
+(`PROWL_STEAL_LEAST_RECENT=true`); set `PROWL_STEAL_LEAST_RECENT=0` to keep every tab until its
+idle timeout or an explicit `browser.close`.
+
+```json
+{ "cmd": "browser.open", "url": "https://example.com/", "proxy": { "name": "decodo" } }
+```
+
+```json
+{
+  "status": "ok",
+  "message": "Tab opened",
+  "tab": { "id": "tab-1", "url": "https://example.com/", "title": "Example Domain", "status": 200 },
+  "reused": false
+}
+```
+
+`browser.close` reports the ids it closed, and closing a tab that is not open is a no-op, so the
+command is safe to retry.
+
+## Window size and display
+
+The browser renders into a headed window on the container's X display. By default it launches at a
+default screen size of `1920x980`, which the page is laid out for and which may be larger than the
+display the window is shown on. `PROWL_WINDOW_SIZE` sets the launch size explicitly as
+`WIDTHxHEIGHT`, for example `1600x900`.
+
+The configured size is not only the window. The page viewport and the screen size the page reports
+are set to the same value, so the window, the viewport, and the reported screen agree, and a page
+lays out at the size that is actually shown instead of wider than the window it is rendered in.
+That alignment is the whole effect: it makes the sizes agree rather than disguising any of them,
+and it is not an anti-fingerprinting measure. Leaving it unset keeps the default size.
+
+The window is always placed at the origin, so the window manager fits it to the screen rather than
+Chromium restoring a placement saved for a larger display, which would leave the window's right and
+bottom edges out of reach.
 
 ## CLI
 
@@ -223,6 +447,58 @@ browser path without any challenge-specific behavior.
 Live websites are **smoke tests**, not deterministic CI. The default test suite never
 touches the network: the browser is replaced by a fake backend and a local HTTP fixture, so
 runs are reproducible offline. Any live target check is opt-in and must be run explicitly.
+
+## Extensions and managed policy
+
+Both are deployment configuration rather than per-request input, because the browser and its
+persistent profile are shared by every request. Both are read at launch, so a change needs a
+restart.
+
+`PROWL_EXTENSIONS_DIR` points at a directory of unpacked extensions. Each immediate
+subdirectory holding a `manifest.json` is loaded with `--load-extension` and
+`--disable-extensions-except`, so the browser runs exactly that set. A subdirectory without a
+manifest, or with one that will not parse, is skipped with a warning rather than failing the
+launch. An absent or empty directory launches exactly as it did before the option existed.
+
+Two things are worth stating plainly. A modern Chromium no longer runs Manifest V2 extensions,
+so an ad blocker has to be a Manifest V3 build: uBlock Origin Lite rather than the original
+uBlock Origin. And an extension runs inside the pages it applies to, so it is visible to them
+and is one more thing that distinguishes this browser from a stock one, which matters for a
+browser whose value is passing bot checks.
+
+`PROWL_POLICY_DIR` points at a directory of managed policy JSON files. Chromium reads managed
+policy from a system directory whose path depends on how the build is branded: a Chromium build
+reads `/etc/chromium/policies/managed` and a Chrome-branded build reads
+`/etc/opt/chrome/policies/managed`. A build cannot be asked which it is, so Prowl writes every
+policy file into each of those directories that it can, and a file under a path the build does
+not read is inert. When the container runs unprivileged it cannot create them, and the operator
+mounts the policy directory at one of those paths instead; Prowl says which directories it could
+not write.
+
+Policies set what policies can set. For an unpacked extension that is who may run it, which
+hosts it may reach, and whether it is pinned to the toolbar, through `ExtensionSettings`:
+
+```json
+{
+  "ExtensionSettings": {
+    "*": {
+      "toolbar_pin": "force_pinned",
+      "runtime_allowed_hosts": ["https://*"],
+      "runtime_blocked_hosts": []
+    }
+  }
+}
+```
+
+What policy does **not** cover is a permission a user normally grants by clicking, such as
+uBlock Origin Lite's "Allow User Scripts". That value lives in the profile rather than in policy,
+and Prowl does not seed it: the mechanism is a profile key the extension system owns
+(`extensions.settings.<id>.granted_permissions`), the id of an unpacked extension is derived from
+its path, and no browser launch was available to prove that writing it has the intended effect.
+Rather than ship a guess, the option is left out and the limit is documented here. What does work
+is that a click is a one-time cost: Prowl owns its profile and packs it on shutdown, so a toggle
+granted once inside the browser survives every restart, so a deployment that needs a preset
+toggle should treat the click as the supported path for now.
 
 ## Releases
 
