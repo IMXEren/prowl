@@ -4,10 +4,13 @@ set -euo pipefail
 
 read -r image version moving_tag amd64_digest arm64_digest < <(python - <<'PY'
 import json
+from pathlib import Path
 
 with open("release-image.json", encoding="utf-8") as handle:
     data = json.load(handle)
-print(data["image"], data["version"], data["moving_tag"], data["amd64_digest"], data["arm64_digest"])
+amd64_digest = Path("image-amd64.digest").read_text(encoding="utf-8").strip()
+arm64_digest = Path("image-arm64.digest").read_text(encoding="utf-8").strip()
+print(data["image"], data["version"], data["moving_tag"], amd64_digest, arm64_digest)
 PY
 )
 if [[ -z "$image" || -z "$version" || -z "$moving_tag" || -z "$amd64_digest" || -z "$arm64_digest" ]]; then

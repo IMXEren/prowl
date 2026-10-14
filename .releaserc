@@ -77,7 +77,7 @@
     [
       "@semantic-release/exec",
       {
-        "publishCmd": "bash .github/scripts/publish-image.sh ${nextRelease.version}"
+        "publishCmd": "bash .github/scripts/prepare-image.sh ${nextRelease.version}"
       }
     ],
     [
