@@ -21,7 +21,7 @@ import asyncio
 import enum
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Final, Literal, cast
@@ -265,7 +265,7 @@ class SessionRegistry:
         *,
         mode: str | None = None,
         egress: str | _Unset | None = _UNSET,
-    ) -> AsyncIterator[SessionInfo | None]:
+    ) -> AsyncGenerator[SessionInfo | None, None]:
         """Serialize work for *session_id* and yield the leased generation's metadata.
 
         A ``None`` session is not serialized here; the service owns the dedicated

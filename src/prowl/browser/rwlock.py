@@ -18,7 +18,7 @@ This file is public domain.
 # _______________________________________________________________________
 # Imports
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from threading import Lock
 
@@ -71,7 +71,7 @@ class RWLock(object):
         self.num_r_lock.release()
 
     @contextmanager
-    def r_locked(self) -> Iterator[None]:
+    def r_locked(self) -> Generator[None, None, None]:
         """This method is designed to be used via the `with` statement."""
         try:
             self.r_acquire()
@@ -89,7 +89,7 @@ class RWLock(object):
         self.w_lock.release()
 
     @contextmanager
-    def w_locked(self) -> Iterator[None]:
+    def w_locked(self) -> Generator[None, None, None]:
         """This method is designed to be used via the `with` statement."""
         try:
             self.w_acquire()

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Generator
 
 _COUNTER_NAMES = (
     "requests_total",
@@ -67,7 +67,7 @@ class Metrics:
     browser_acquire_seconds: Timing = field(default_factory=Timing)
 
     @contextmanager
-    def request(self) -> Iterator[None]:
+    def request(self) -> Generator[None, None, None]:
         """Count and time a request, releasing the gauge on errors and cancellation."""
         self.requests_total += 1
         self.requests_active += 1

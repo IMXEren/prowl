@@ -32,7 +32,7 @@ from prowl.shutdown import get_process_cancel_token
 from prowl.structures import CaseInsensitiveDict
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncGenerator, Mapping
 
     from playwright.async_api import Page, Route
 
@@ -361,7 +361,7 @@ class PageHandler:
             )
 
     @contextlib.asynccontextmanager
-    async def media_filter(self: Self) -> "AsyncIterator[None]":
+    async def media_filter(self: Self) -> "AsyncGenerator[None, None]":
         """Temporarily abort image, stylesheet, and font requests on the selected page."""
         page = self._tg.ppage
 

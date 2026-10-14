@@ -58,7 +58,7 @@ from prowl.service.context_state import ContextStateStore
 from prowl.service.errors import CallerSafeError, ProxyError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 from prowl.service.protocol import (
     CMD_BROWSER_CLOSE,
     CMD_BROWSER_LIST,
@@ -549,7 +549,7 @@ class Service:
         egress: str,
         mode: str | None,
         lease_egress: str | None,
-    ) -> AsyncIterator[SessionInfo | None]:
+    ) -> AsyncGenerator[SessionInfo | None, None]:
         """Hold the request's serialization guard and the global concurrency bound.
 
         A named session serializes on its own lease, which validates the command's explicit mode

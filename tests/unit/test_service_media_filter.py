@@ -14,7 +14,7 @@ from prowl.service.errors import CallerSafeError
 from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     from prowl.browser.page_handler import PageResponse
 
@@ -25,7 +25,7 @@ def _recording_media_filter(site: Mock, events: list[str]) -> Mock:
     """Install a ``media_filter`` double that records entering and leaving its scope."""
 
     @contextlib.asynccontextmanager
-    async def scope() -> AsyncIterator[None]:
+    async def scope() -> AsyncGenerator[None, None]:
         events.append("enter")
         try:
             yield
@@ -40,7 +40,7 @@ def _failing_media_filter(site: Mock, error: BaseException) -> Mock:
     """Install a ``media_filter`` double whose scope fails on entry."""
 
     @contextlib.asynccontextmanager
-    async def scope() -> AsyncIterator[None]:
+    async def scope() -> AsyncGenerator[None, None]:
         raise error
         yield
 
@@ -189,7 +189,7 @@ class MediaFilterBodyFailureTests(_SnapshotFixture):
         backend, group, site, events = self._backend()
 
         @contextlib.asynccontextmanager
-        async def fail_cleanup() -> AsyncIterator[None]:
+        async def fail_cleanup() -> AsyncGenerator[None, None]:
             yield
             events.append("cleanup")
             message = "cleanup failed"
