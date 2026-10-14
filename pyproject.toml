@@ -19,7 +19,7 @@ dependencies = [
     "pycryptodome==3.23.0",
     "aiohttp==3.13.5",
     "h11==0.16.0",
-    "cryptography==50.0.1",
+    "cryptography==50.0.2",
 
 ]
 
