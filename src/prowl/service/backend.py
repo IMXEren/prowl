@@ -133,7 +133,6 @@ class FetchRequest:
     wait_in_seconds: float = 0.0
     return_screenshot: bool = False
     disable_media: bool = False
-    tabs_till_verify: int | None = None
     solve_captcha: bool = False
 
 
@@ -162,7 +161,6 @@ class FetchResult:
     body_bytes: bytes | None = None
     header_items: tuple[tuple[str, str], ...] | None = None
     screenshot: str | None = None
-    turnstile_token: str | None = None
     captcha_provider: str | None = None
     captcha_token: str | None = None
 
@@ -624,9 +622,6 @@ class BrowserBackend:
             ):
                 msg = "browser response options require browser or auto mode"
                 raise CallerSafeError(msg)
-            if request.tabs_till_verify is not None and (request.method != "GET" or request.mode == HTTP_MODE):
-                msg = "explicit verification requires browser or auto GET"
-                raise CallerSafeError(msg)
             if request.solve_captcha and (request.method != "GET" or request.mode == HTTP_MODE):
                 msg = "captcha solving requires browser or auto GET"
                 raise CallerSafeError(msg)
@@ -752,7 +747,6 @@ class BrowserBackend:
                 request.wait_in_seconds > 0
                 or request.return_screenshot
                 or request.disable_media
-                or request.tabs_till_verify is not None
                 or request.solve_captcha
             ):
                 # A requested capture, media suppression, explicit verification or captcha solving is
@@ -1341,15 +1335,6 @@ async def _fetch_site_result(
             post_data=request.post_data,
             headers=request.headers,
         )
-    elif request.tabs_till_verify is not None:
-        source = await site.get(
-            request.url,
-            request.timeout_seconds,
-            headers=request.headers,
-            header_scope=request.header_scope,
-            tabs_till_verify=request.tabs_till_verify,
-            **captcha,
-        )
     elif request.headers:
         source = await site.get(
             request.url,
@@ -1378,7 +1363,6 @@ async def _fetch_site_result(
         cookies=cookies,
         user_agent=source.user_agent,
         screenshot=source.screenshot if request.return_screenshot else None,
-        turnstile_token=source.turnstile_token if request.tabs_till_verify is not None else None,
         captcha_provider=source.captcha_provider if request.solve_captcha else None,
         captcha_token=source.captcha_token if request.solve_captcha else None,
     )

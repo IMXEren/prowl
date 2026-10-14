@@ -57,6 +57,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
     from http.server import BaseHTTPRequestHandler
 
+    from playwright.async_api import Route
+
 EXCHANGE_TIMEOUT_SECONDS = 30.0
 CLOSE_TIMEOUT_SECONDS = 5.0
 OK_STATUS = 200
@@ -533,8 +535,8 @@ async def _run_probe(
             )
             results.append(
                 (
-                    "native verification extracts fresh tokens with one navigation and preserves cookie-only capture",
-                    await _check_verification(app[_SERVICE_KEY], backend, origin_url, state, media_observed),
+                    "native widget click extracts fresh tokens and preserves cookie-only capture",
+                    await _check_verification_with_frame(app[_SERVICE_KEY], backend, origin_url, state, media_observed),
                 )
             )
             results.append(
@@ -645,18 +647,40 @@ async def _check_media(service: app_module.Service, origin_url: str, state: _Sit
     return True
 
 
+_WIDGET_FRAME_URL = "https://challenges.cloudflare.com/prowl-local-widget"
+_WIDGET_FRAME = """<!doctype html><html><body><label>
+<input type="checkbox" onchange="parent.postMessage('widget-checked', '*')">Verify locally
+</label></body></html>"""
 _WIDGET_PAGE = """<!doctype html><html><head><title>Local verification</title></head><body>
 <input name="cf-turnstile-response" type="hidden" value="old-value">
-<label><input id="verify" type="checkbox">Verify locally</label><p id="result">Not verified</p>
-<script>
-const box = document.getElementById('verify');
-box.addEventListener('change', () => {
+<iframe src="https://challenges.cloudflare.com/prowl-local-widget" style="width: 80px"></iframe>
+<p id="result">Not verified</p><script>
+window.addEventListener('message', event => {
+    if (event.origin !== 'https://challenges.cloudflare.com' || event.data !== 'widget-checked') return;
     document.querySelector("input[name='cf-turnstile-response']").value = 'offline-widget-value';
     document.getElementById('result').textContent = 'Verified locally';
     document.cookie = 'widgetdone=1; Path=/; Secure';
 });
-if (location.search.includes('zero')) box.focus();
 </script></body></html>"""
+
+
+async def _check_verification_with_frame(
+    service: app_module.Service,
+    backend: BrowserBackend,
+    origin_url: str,
+    state: _SiteState,
+    observed: list[str],
+) -> bool:
+    handle = await Browser.get_context(None)
+
+    async def widget_route(route: Route) -> None:
+        await route.fulfill(content_type="text/html", body=_WIDGET_FRAME)
+
+    await handle.context.route(_WIDGET_FRAME_URL, widget_route)
+    try:
+        return await _check_verification(service, backend, origin_url, state, observed)
+    finally:
+        await handle.context.unroute(_WIDGET_FRAME_URL, widget_route)
 
 
 async def _check_verification(
@@ -668,7 +692,7 @@ async def _check_verification(
 ) -> bool:
     state.pages["/widget"] = _WIDGET_PAGE
     fastpath_before = backend.metrics.http_fastpath_total
-    for suffix, tabs, cookie_only in (("", 1, False), ("?zero", 0, True)):
+    for suffix, cookie_only in (("", False), ("?cookies", True)):
         target = "/widget" + suffix
         before = observed.count(target)
         status, payload = await service.handle(
@@ -676,7 +700,7 @@ async def _check_verification(
                 "cmd": "request.get",
                 "url": origin_url + target,
                 "mode": "auto",
-                "tabs_till_verify": tabs,
+                "solveCaptcha": True,
                 "returnScreenshot": True,
                 "disableMedia": True,
                 "returnOnlyCookies": cookie_only,
@@ -688,7 +712,8 @@ async def _check_verification(
         if not (
             status == OK_STATUS
             and payload.get("status") == "ok"
-            and solution.get("turnstile_token") == "offline-widget-value"
+            and solution.get("captcha_provider") == "turnstile"
+            and solution.get("captcha_token") == "offline-widget-value"
             and _valid_png(payload)
             and solution.get("url") == origin_url + target
             and observed.count(target) - before == 1
@@ -699,20 +724,20 @@ async def _check_verification(
             and (solution.get("response") == "" if cookie_only else "Verified locally" in solution.get("response", ""))
         ):
             _emit(
-                f"Verification fixture failed: tabs={tabs}, status={status}, "
+                f"Verification fixture failed: cookie_only={cookie_only}, status={status}, "
                 f"ok={payload.get('status') == 'ok'}, "
-                f"fresh={solution.get('turnstile_token') == 'offline-widget-value'}, "
+                f"fresh={solution.get('captcha_token') == 'offline-widget-value'}, "
                 f"png={_valid_png(payload)}, navigation_count={observed.count(target) - before}, "
                 f"url_matches={solution.get('url') == origin_url + target}"
             )
             return False
     status, payload = await service.handle(
-        {"cmd": "request.get", "url": origin_url + "/", "mode": "auto", "tabs_till_verify": 0, "maxTimeout": 15000}
+        {"cmd": "request.get", "url": origin_url + "/", "mode": "auto", "solveCaptcha": True, "maxTimeout": 15000}
     )
     return (
         status == OK_STATUS
         and payload.get("status") == "ok"
-        and "turnstile_token" not in payload.get("solution", {})
+        and "captcha_token" not in payload.get("solution", {})
         and backend.metrics.http_fastpath_total == fastpath_before
     )
 

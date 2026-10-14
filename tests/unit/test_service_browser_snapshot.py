@@ -325,11 +325,10 @@ class FetchOptionShapeTests(TestCase):
         self.assertEqual(request.wait_in_seconds, 0.0)
         self.assertFalse(request.return_screenshot)
         self.assertFalse(request.disable_media)
-        self.assertIsNone(request.tabs_till_verify)
         fields = list(FetchRequest.__dataclass_fields__)
         self.assertEqual(
             fields[fields.index("wait_in_seconds") : fields.index("solve_captcha") + 1],
-            ["wait_in_seconds", "return_screenshot", "disable_media", "tabs_till_verify", "solve_captcha"],
+            ["wait_in_seconds", "return_screenshot", "disable_media", "solve_captcha"],
         )
         self.assertFalse(request.solve_captcha)
 
@@ -344,10 +343,9 @@ class FetchOptionShapeTests(TestCase):
         )
 
         self.assertIsNone(result.screenshot)
-        self.assertIsNone(result.turnstile_token)
         self.assertEqual(
-            list(FetchResult.__dataclass_fields__)[-4:],
-            ["screenshot", "turnstile_token", "captcha_provider", "captcha_token"],
+            list(FetchResult.__dataclass_fields__)[-3:],
+            ["screenshot", "captcha_provider", "captcha_token"],
         )
         self.assertIsNone(result.captcha_provider)
         self.assertIsNone(result.captcha_token)

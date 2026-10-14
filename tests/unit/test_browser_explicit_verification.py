@@ -1,13 +1,13 @@
-"""Explicit verification preserves keyboard, token freshness and native cleanup ownership."""
+"""Explicit verification clicks the widget and requires a fresh response."""
 
 from __future__ import annotations
 
 import asyncio
 import time
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, Mock, call, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from playwright.async_api import JSHandle, Keyboard, Locator, Page
+from playwright.async_api import ElementHandle, Frame, JSHandle, Keyboard, Locator, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydoll.browser.tab import Tab
 from turbohtml import Element, Text
@@ -16,10 +16,6 @@ from prowl.browser.browser import TabGroup
 from prowl.browser.exceptions import PageLoadError
 from prowl.browser.page_handler import PageHandler, PageResponse
 from prowl.browser.solvers import CloudflareSolver
-
-_ANCHOR_REMOVE = "node => node.remove()"
-_UNCHANGED = "turnstile value unchanged"
-_TABS = 3
 
 
 def _document(title_text: str) -> Element:
@@ -40,13 +36,6 @@ def _handle(value: str = "token") -> Mock:
     return handle
 
 
-def _anchor() -> Mock:
-    anchor = Mock(spec=JSHandle)
-    anchor.evaluate = AsyncMock()
-    anchor.dispose = AsyncMock()
-    return anchor
-
-
 def _page(
     *,
     count: int = 1,
@@ -64,6 +53,20 @@ def _page(
     page.evaluate = AsyncMock(return_value=None)
     page.evaluate_handle = AsyncMock()
     page.wait_for_function = AsyncMock(return_value=wait_return)
+    frame = Mock(spec=Frame)
+    frame.url = "https://challenges.cloudflare.com/widget"
+    element = Mock(spec=ElementHandle)
+    element.is_visible = AsyncMock(return_value=True)
+    element.evaluate = AsyncMock(return_value=["", ""])
+    element.dispose = AsyncMock()
+    frame.frame_element = AsyncMock(return_value=element)
+    checkbox = Mock(spec=Locator)
+    checkbox.count = AsyncMock(return_value=1)
+    checkbox.nth = Mock(return_value=checkbox)
+    checkbox.is_visible = AsyncMock(return_value=True)
+    checkbox.click = AsyncMock()
+    frame.get_by_role = Mock(return_value=checkbox)
+    page.frames = [frame]
     return page, widget
 
 
@@ -76,73 +79,63 @@ def _site(group: Mock) -> PageHandler:
 
 
 class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
-    """``PageHandler.verify_turnstile`` presses native keys and returns only a changed token."""
+    """Verification keeps native clicking first and never uses keyboard fallback."""
 
-    async def test_absent_widget_returns_none_without_keyboard_work(self) -> None:
+    async def test_absent_widget_returns_none_without_click(self) -> None:
         group = Mock(spec=TabGroup)
         page, widget = _page(count=0)
         group.ppage = page
-        site = _site(group)
-
-        result = await site.verify_turnstile(_TABS)
-
-        self.assertIsNone(result)
-        page.keyboard.press.assert_not_called()
+        self.assertIsNone(await _site(group).verify_turnstile())
+        page.frames[0].get_by_role.assert_not_called()
         widget.evaluate_all.assert_not_called()
-        page.wait_for_function.assert_not_called()
-        page.evaluate_handle.assert_not_called()
+        page.keyboard.press.assert_not_called()
 
-    async def test_tab_and_space_sequence_returns_changed_value(self) -> None:
+    async def test_fallback_widens_frame_and_clicks_actual_checkbox(self) -> None:
         group = Mock(spec=TabGroup)
         handle = _handle("new-token")
         page, _ = _page(initial="old", wait_return=handle)
         group.ppage = page
-        site = _site(group)
-
-        result = await site.verify_turnstile(_TABS)
-
-        self.assertEqual(result, "new-token")
-        self.assertEqual(page.keyboard.press.call_args_list, [call("Tab")] * _TABS + [call("Space")])
-        handle.dispose.assert_awaited_once()
+        self.assertEqual(await _site(group).verify_turnstile(), "new-token")
+        frame = page.frames[0]
+        frame.get_by_role.assert_called_once_with("checkbox")
+        frame.get_by_role.return_value.click.assert_awaited_once()
+        element = frame.frame_element.return_value
+        self.assertIn("300px", element.evaluate.await_args_list[1].args[0])
+        self.assertEqual(element.evaluate.await_args_list[2].args[1], ["", ""])
+        element.dispose.assert_awaited_once()
+        page.keyboard.press.assert_not_called()
         page.evaluate_handle.assert_not_called()
+        handle.dispose.assert_awaited_once()
         self.assertEqual(page.wait_for_function.await_args.kwargs["arg"], ["old"])
-        self.assertNotIn('"old"', page.wait_for_function.await_args.args[0])
 
     async def test_duplicate_response_inputs_track_each_initial_value(self) -> None:
         group = Mock(spec=TabGroup)
-        handle = _handle("fresh")
-        page, widget = _page(count=2, wait_return=handle)
+        page, widget = _page(count=2, wait_return=_handle("fresh"))
         widget.evaluate_all = AsyncMock(return_value=["", "previous"])
         group.ppage = page
-
-        result = await _site(group).verify_turnstile(0)
-
-        self.assertEqual(result, "fresh")
+        self.assertEqual(await _site(group).verify_turnstile(), "fresh")
         self.assertEqual(page.wait_for_function.await_args.kwargs["arg"], ["", "previous"])
         expression = page.wait_for_function.await_args.args[0]
         self.assertIn("querySelectorAll", expression)
         self.assertIn("initial.includes(input.value)", expression)
         self.assertNotIn("previous", expression)
 
-    async def test_owned_native_checkbox_waits_for_changed_token_without_keyboard(self) -> None:
+    async def test_owned_native_checkbox_waits_without_fallback(self) -> None:
         group = Mock(spec=TabGroup)
-        handle = _handle("fresh")
-        page, widget = _page(count=2, wait_return=handle)
-        widget.evaluate_all = AsyncMock(return_value=["", ""])
+        page, _ = _page(wait_return=_handle("fresh"))
         group.ppage = page
         site = _site(group)
         tab = Mock(spec=Tab)
         site.tab = tab
         site._active_solver = (CloudflareSolver(), tab)
-
-        with patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock(return_value=True)) as click:
-            result = await site.verify_turnstile(2)
-
-        self.assertEqual(result, "fresh")
+        with (
+            patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock(return_value=True)) as click,
+            patch("prowl.browser.page_handler.find_and_click_turnstile", AsyncMock()) as fallback,
+        ):
+            self.assertEqual(await site.verify_turnstile(), "fresh")
         click.assert_awaited_once_with(tab, page)
+        fallback.assert_not_awaited()
         page.keyboard.press.assert_not_called()
-        self.assertEqual(page.wait_for_function.await_args.kwargs["arg"], ["", ""])
-        handle.dispose.assert_awaited_once()
 
     async def test_owned_native_solver_accepts_token_already_issued_on_new_page(self) -> None:
         group = Mock(spec=TabGroup)
@@ -154,16 +147,13 @@ class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
         tab = Mock(spec=Tab)
         site.tab = tab
         site._active_solver = (CloudflareSolver(), tab)
-
         with patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock()) as click:
-            result = await site.verify_turnstile(0)
-
-        self.assertEqual(result, "issued")
+            self.assertEqual(await site.verify_turnstile(), "issued")
         click.assert_not_awaited()
         page.keyboard.press.assert_not_called()
         page.wait_for_function.assert_not_awaited()
 
-    async def test_stale_prefilled_input_is_not_claimed_as_solver_result(self) -> None:
+    async def test_stale_prefilled_input_requires_fresh_response(self) -> None:
         group = Mock(spec=TabGroup)
         page, _ = _page(initial="old-value", wait_return=_handle("new-value"))
         group.ppage = page
@@ -171,118 +161,120 @@ class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
         tab = Mock(spec=Tab)
         site.tab = tab
         site._active_solver = (CloudflareSolver(), tab)
-
         with patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock(return_value=False)):
-            result = await site.verify_turnstile(1)
-
-        self.assertEqual(result, "new-value")
+            self.assertEqual(await site.verify_turnstile(), "new-value")
         page.evaluate.assert_awaited_once()
-        self.assertEqual(page.keyboard.press.call_args_list, [call("Tab"), call("Space")])
+        page.keyboard.press.assert_not_called()
         self.assertEqual(page.wait_for_function.await_args.kwargs["arg"], ["old-value"])
 
-    async def test_native_wait_timeout_retries_from_one_owned_focus_node(self) -> None:
+    async def test_unchanged_value_expires_at_original_deadline(self) -> None:
         group = Mock(spec=TabGroup)
-        handle = _handle("retried")
-        calls = {"n": 0}
+        page, _ = _page()
 
-        async def _wait(*_args: object, **_kwargs: object) -> Mock:
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise PlaywrightTimeoutError(_UNCHANGED)
-            return handle
-
-        page, _ = _page(initial="old")
-        page.wait_for_function = AsyncMock(side_effect=_wait)
-        anchor = _anchor()
-        page.evaluate_handle = AsyncMock(return_value=anchor)
-        group.ppage = page
-        site = _site(group)
-
-        result = await site.verify_turnstile(_TABS)
-
-        self.assertEqual(result, "retried")
-        page.evaluate_handle.assert_awaited_once()
-        self.assertEqual(page.keyboard.press.call_args_list, ([call("Tab")] * _TABS + [call("Space")]) * 2)
-        anchor.evaluate.assert_any_await("node => node.focus()")
-        anchor.evaluate.assert_any_await(_ANCHOR_REMOVE)
-        anchor.dispose.assert_awaited_once()
-
-    async def test_unchanged_value_deadline_removes_and_disposes_helper(self) -> None:
-        group = Mock(spec=TabGroup)
-        calls = {"n": 0}
-
-        async def _wait(*_args: object, **_kwargs: object) -> Mock:
-            calls["n"] += 1
-            if calls["n"] == 1:
-                raise PlaywrightTimeoutError(_UNCHANGED)
+        async def wait(*_args: object, **_kwargs: object) -> Mock:
             await asyncio.Event().wait()
             return _handle()
 
-        page, _ = _page(initial="")
-        page.wait_for_function = AsyncMock(side_effect=_wait)
-        anchor = _anchor()
-        page.evaluate_handle = AsyncMock(return_value=anchor)
+        page.wait_for_function = AsyncMock(side_effect=wait)
         group.ppage = page
-        site = PageHandler(group)
-        site.timeout = 1
-        site.start = time.perf_counter()
-
+        site = _site(group)
+        site.timeout = 0.05
         with self.assertRaises(TimeoutError):
-            await site.verify_turnstile(_TABS)
-
-        anchor.evaluate.assert_any_await(_ANCHOR_REMOVE)
-        anchor.dispose.assert_awaited_once()
+            await site.verify_turnstile()
+        page.keyboard.press.assert_not_called()
+        page.frames[0].frame_element.return_value.dispose.assert_awaited_once()
 
     async def test_selected_page_survives_group_swap(self) -> None:
         group = Mock(spec=TabGroup)
-        handle = _handle("captured")
-        page_one, _ = _page(initial="old", wait_return=handle)
-        page_two, _ = _page(initial="old", wait_return=handle)
+        page_one, _ = _page(wait_return=_handle("captured"))
+        page_two, _ = _page()
         group.ppage = page_one
-        site = _site(group)
 
-        async def _swap(*_args: object, **_kwargs: object) -> Mock:
+        async def swap(**_kwargs: object) -> None:
             group.ppage = page_two
-            return handle
 
-        page_one.wait_for_function = AsyncMock(side_effect=_swap)
+        page_one.frames[0].get_by_role.return_value.click = AsyncMock(side_effect=swap)
+        self.assertEqual(await _site(group).verify_turnstile(), "captured")
+        page_two.frames[0].get_by_role.assert_not_called()
+        page_two.wait_for_function.assert_not_called()
 
-        result = await site.verify_turnstile(_TABS)
-
-        self.assertEqual(result, "captured")
-        self.assertEqual(page_one.keyboard.press.await_count, _TABS + 1)
-        page_two.keyboard.press.assert_not_called()
-
-    async def test_cancellation_cleans_up_owned_focus_node(self) -> None:
+    async def test_cancelled_click_restores_width_and_disposes_frame(self) -> None:
         group = Mock(spec=TabGroup)
-        started = asyncio.Event()
-        blocking = asyncio.Event()
-        blocker = asyncio.Event()
-
-        async def _wait(*_args: object, **_kwargs: object) -> Mock:
-            if not started.is_set():
-                started.set()
-                raise PlaywrightTimeoutError(_UNCHANGED)
-            blocking.set()
-            await blocker.wait()
-            return _handle()
-
-        page, _ = _page(initial="old")
-        page.wait_for_function = AsyncMock(side_effect=_wait)
-        anchor = _anchor()
-        page.evaluate_handle = AsyncMock(return_value=anchor)
+        page, _ = _page()
         group.ppage = page
-        site = _site(group)
+        started = asyncio.Event()
 
-        task = asyncio.create_task(site.verify_turnstile(_TABS))
+        async def block(**_kwargs: object) -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        page.frames[0].get_by_role.return_value.click = AsyncMock(side_effect=block)
+        task = asyncio.create_task(_site(group).verify_turnstile())
         await asyncio.wait_for(started.wait(), timeout=1)
-        await asyncio.wait_for(blocking.wait(), timeout=1)
         task.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await task
+        element = page.frames[0].frame_element.return_value
+        self.assertEqual(element.evaluate.await_args_list[-1].args[1], ["", ""])
+        element.dispose.assert_awaited_once()
+        page.wait_for_function.assert_not_called()
 
-        anchor.evaluate.assert_any_await(_ANCHOR_REMOVE)
-        anchor.dispose.assert_awaited_once()
+
+class WidgetClickScopeTests(IsolatedAsyncioTestCase):
+    """The fallback never guesses a target or clicks the response container."""
+
+    async def test_spoofed_provider_frame_is_ignored(self) -> None:
+        group = Mock(spec=TabGroup)
+        page, _ = _page()
+        page.frames[0].url = "https://challenges.cloudflare.com.example.org/widget"
+        group.ppage = page
+        self.assertIsNone(await _site(group).verify_turnstile())
+        page.frames[0].frame_element.assert_not_awaited()
+        page.wait_for_function.assert_not_awaited()
+
+    async def test_hidden_frame_is_ignored(self) -> None:
+        group = Mock(spec=TabGroup)
+        page, _ = _page()
+        element = page.frames[0].frame_element.return_value
+        element.is_visible = AsyncMock(return_value=False)
+        group.ppage = page
+        self.assertIsNone(await _site(group).verify_turnstile())
+        page.frames[0].get_by_role.assert_not_called()
+        element.dispose.assert_awaited_once()
+
+    async def test_multiple_visible_checkboxes_are_not_clicked(self) -> None:
+        group = Mock(spec=TabGroup)
+        page, _ = _page()
+        checkbox = page.frames[0].get_by_role.return_value
+        checkbox.count = AsyncMock(return_value=2)
+        group.ppage = page
+        self.assertIsNone(await _site(group).verify_turnstile())
+        checkbox.click.assert_not_awaited()
+        page.frames[0].frame_element.return_value.evaluate.assert_not_awaited()
+
+    async def test_closed_shadow_without_accessible_control_is_not_guessed(self) -> None:
+        group = Mock(spec=TabGroup)
+        page, _ = _page()
+        checkbox = page.frames[0].get_by_role.return_value
+        checkbox.count = AsyncMock(return_value=0)
+        group.ppage = page
+        self.assertIsNone(await _site(group).verify_turnstile())
+        checkbox.click.assert_not_awaited()
+        page.keyboard.press.assert_not_called()
+
+    async def test_click_failure_restores_existing_important_width(self) -> None:
+        group = Mock(spec=TabGroup)
+        page, _ = _page()
+        element = page.frames[0].frame_element.return_value
+        element.evaluate = AsyncMock(return_value=["125px", "important"])
+        checkbox = page.frames[0].get_by_role.return_value
+        checkbox.click = AsyncMock(side_effect=PlaywrightTimeoutError("click timed out"))
+        group.ppage = page
+        with self.assertRaises(PlaywrightTimeoutError):
+            await _site(group).verify_turnstile()
+        self.assertEqual(element.evaluate.await_args_list[-1].args[1], ["125px", "important"])
+        element.dispose.assert_awaited_once()
+        page.wait_for_function.assert_not_awaited()
 
 
 class SiteGetVerificationTests(IsolatedAsyncioTestCase):
@@ -301,10 +293,14 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
         group.ptab = future
         page = Mock(spec=Page)
         page.url = "https://example.com/verified"
+        frame = Mock(spec=Frame)
+        frame.url = "https://challenges.cloudflare.com/widget"
+        page.frames = [frame]
+        page.query_selector_all = AsyncMock(return_value=[])
         group.ppage = page
         return group, tab
 
-    async def _run_get(self, group: Mock, *, tabs_till_verify: int | None, tree: Element) -> PageResponse:
+    async def _run_get(self, group: Mock, *, solve_captcha: bool, tree: Element) -> PageResponse:
         site = _site(group)
         with (
             patch.object(PageHandler, "_add_network_listeners", AsyncMock()),
@@ -314,21 +310,22 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
             patch.object(PageHandler, "_wait_page_load", AsyncMock()),
             patch.object(PageHandler, "build_dom_tree", AsyncMock(return_value=tree)),
         ):
-            return await site.get("https://example.com/page", 30, tabs_till_verify=tabs_till_verify)
+            return await site.get("https://example.com/page", 30, solve_captcha=solve_captcha)
 
     async def test_default_get_does_not_verify_or_attach(self) -> None:
         group, tab = self._group()
         with patch.object(PageHandler, "verify_turnstile", AsyncMock()) as verify:
-            result = await self._run_get(group, tabs_till_verify=None, tree=_document("Ready"))
+            result = await self._run_get(group, solve_captcha=False, tree=_document("Ready"))
 
         verify.assert_not_called()
-        self.assertIsNone(result.turnstile_token)
+        tab.enable_auto_solve_cloudflare_captcha.assert_not_awaited()
+        self.assertIsNone(result.captcha_token)
         self.assertIsNone(result.url)
         self.assertEqual(tab.go_to.await_count, 1)
 
     async def test_enabled_get_navigates_once_then_verifies(self) -> None:
         group, tab = self._group()
-        seen: list[int] = []
+        seen: list[bool] = []
 
         async def _go_to(*_args: object, **_kwargs: object) -> None:
             tab.enable_auto_solve_cloudflare_captcha.assert_awaited_once_with(
@@ -337,17 +334,18 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
 
         tab.go_to = AsyncMock(side_effect=_go_to)
 
-        async def _verify(tabs: int) -> str:
-            seen.append(tabs)
+        async def _verify() -> str:
+            seen.append(True)
             self.assertEqual(tab.go_to.await_count, 1)
             return "tok"
 
         with patch.object(PageHandler, "verify_turnstile", AsyncMock(side_effect=_verify)):
-            result = await self._run_get(group, tabs_till_verify=2, tree=_document("Ready"))
+            result = await self._run_get(group, solve_captcha=True, tree=_document("Ready"))
 
-        self.assertEqual(seen, [2])
+        self.assertEqual(seen, [True])
         self.assertEqual(tab.go_to.await_count, 1)
-        self.assertEqual(result.turnstile_token, "tok")
+        self.assertEqual(result.captcha_provider, "turnstile")
+        self.assertEqual(result.captcha_token, "tok")
         self.assertEqual(result.url, "https://example.com/verified")
         tab.disable_auto_solve_cloudflare_captcha.assert_awaited_once()
 
@@ -368,11 +366,10 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
 
     async def test_enabled_get_reports_bounded_token_timeout(self) -> None:
         group, _ = self._group()
-        with (
-            patch.object(PageHandler, "verify_turnstile", AsyncMock(side_effect=TimeoutError)),
-            self.assertRaisesRegex(PageLoadError, "turnstile verification timed out"),
-        ):
-            await self._run_get(group, tabs_till_verify=1, tree=_document("Ready"))
+        with patch.object(PageHandler, "verify_turnstile", AsyncMock(side_effect=TimeoutError)):
+            result = await self._run_get(group, solve_captcha=True, tree=_document("Ready"))
+        self.assertIsNone(result.captcha_token)
+        self.assertIsNone(result.captcha_provider)
 
     async def test_enabled_get_still_rejects_challenge_title(self) -> None:
         group, _ = self._group()
@@ -380,13 +377,13 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
             patch.object(PageHandler, "verify_turnstile", AsyncMock(return_value=None)),
             self.assertRaisesRegex(PageLoadError, "cloudflare protection"),
         ):
-            await self._run_get(group, tabs_till_verify=1, tree=_document("Just a moment..."))
+            await self._run_get(group, solve_captcha=True, tree=_document("Just a moment..."))
 
 
 class SourceTurnstileSnapshotTests(IsolatedAsyncioTestCase):
     """Snapshot preserves a carried token and the legacy default stays ``None``."""
 
-    async def test_snapshot_preserves_turnstile_token(self) -> None:
+    async def test_snapshot_preserves_captcha_token(self) -> None:
         group = Mock(spec=TabGroup)
         page = Mock(spec=Page)
         page.url = "https://example.com/after"
@@ -396,14 +393,15 @@ class SourceTurnstileSnapshotTests(IsolatedAsyncioTestCase):
             "<html></html>",
             status_code=200,
             url="https://example.com/orig",
-            turnstile_token="carried",  # noqa: S106
+            captcha_provider="turnstile",
+            captcha_token="carried",  # noqa: S106
         )
         fresh = _document("Ready")
 
         with patch.object(PageHandler, "build_dom_tree", AsyncMock(return_value=fresh)):
             result = await site.snapshot(source, wait_in_seconds=0.001)
 
-        self.assertEqual(result.turnstile_token, "carried")
+        self.assertEqual(result.captcha_token, "carried")
 
     async def test_default_get_source_has_no_token(self) -> None:
         group = Mock(spec=TabGroup)
@@ -411,9 +409,9 @@ class SourceTurnstileSnapshotTests(IsolatedAsyncioTestCase):
         site = _site(group)
         source = PageResponse("<html></html>", status_code=200)
 
-        self.assertIsNone(source.turnstile_token)
+        self.assertIsNone(source.captcha_token)
         with patch.object(PageHandler, "build_dom_tree", AsyncMock(return_value=_document("Ready"))):
             result = await site.snapshot(source, return_screenshot=False)
 
         self.assertIs(result, source)
-        self.assertIsNone(result.turnstile_token)
+        self.assertIsNone(result.captcha_token)

@@ -101,7 +101,8 @@ class ClassifiedBrowserResultTests(TestCase):
             body_bytes=b"<html></html>",
             header_items=(("content-type", "text/html"),),
             screenshot="base64-shot",
-            turnstile_token=_TURNSTILE_VALUE,
+            captcha_provider="turnstile",
+            captcha_token=_TURNSTILE_VALUE,
         )
 
         result = _classified(original)
@@ -119,7 +120,7 @@ class ClassifiedBrowserResultTests(TestCase):
         self.assertEqual(result.body_bytes, b"<html></html>")
         self.assertEqual(result.header_items, (("content-type", "text/html"),))
         self.assertEqual(result.screenshot, "base64-shot")
-        self.assertEqual(result.turnstile_token, _TURNSTILE_VALUE)
+        self.assertEqual(result.captcha_token, _TURNSTILE_VALUE)
         self.assertEqual(original.mode, HTTP_MODE)
         self.assertIsNone(original.classification)
 

@@ -254,5 +254,5 @@ class FetchRequestShapeTests(TestCase):
         self.assertEqual(fields[fields.index("body_bytes") + 1], "cookie_header")
         self.assertEqual(
             fields[fields.index("wait_in_seconds") : fields.index("solve_captcha") + 1],
-            ["wait_in_seconds", "return_screenshot", "disable_media", "tabs_till_verify", "solve_captcha"],
+            ["wait_in_seconds", "return_screenshot", "disable_media", "solve_captcha"],
         )

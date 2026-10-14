@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, Self, cast
 from urllib.parse import parse_qsl, urljoin, urlsplit
 
 from loguru import logger
-from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydoll.browser.tab import Tab
 from pydoll.commands.dom_commands import DomCommands
 from pydoll.commands.fetch_commands import FetchCommands
@@ -28,13 +27,14 @@ from prowl.browser.cookies import Cookie, Cookies
 from prowl.browser.exceptions import JSONExtractError, PageLoadError
 from prowl.browser.headers import HEADER_SCOPE_DOCUMENT, HEADER_SCOPES, normalize_custom_headers
 from prowl.browser.solvers import ChallengeSolver, CloudflareSolver, click_embedded_turnstile, solve_visible_captcha
+from prowl.browser.solvers.cloudflare import find_and_click_turnstile
 from prowl.browser.utils import run_coroutine_sync
 from prowl.shutdown import get_process_cancel_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
 
-    from playwright.async_api import JSHandle, Page, Route
+    from playwright.async_api import Page, Route
 
 
 def _add_doctype_header(html: str) -> str:
@@ -53,7 +53,6 @@ class PageResponse:
         user_agent: str | None = None,
         url: str | None = None,
         screenshot: str | None = None,
-        turnstile_token: str | None = None,
         captcha_provider: str | None = None,
         captcha_token: str | None = None,
     ) -> None:
@@ -70,7 +69,6 @@ class PageResponse:
         self.user_agent = user_agent
         self.url = url
         self.screenshot = screenshot
-        self.turnstile_token = turnstile_token
         self.captcha_provider = captcha_provider
         self.captcha_token = captcha_token
 
@@ -108,15 +106,6 @@ class PageResponse:
 _MEDIA_RESOURCE_TYPES: frozenset[str] = frozenset({"image", "stylesheet", "font"})
 
 _TURNSTILE_INPUT_SELECTOR: str = "input[name='cf-turnstile-response']"
-_TURNSTILE_RETRY_TIMEOUT_MS: int = 2000
-_TURNSTILE_ANCHOR_EXPRESSION: str = (
-    "() => {"
-    " const anchor = document.createElement('button');"
-    " anchor.type = 'button';"
-    " document.body.prepend(anchor);"
-    " return anchor;"
-    " }"
-)
 
 
 class PageHandler:
@@ -158,14 +147,13 @@ class PageHandler:
         """Returns a new tab in the current browser group."""
         return await self._tg.new_tab()
 
-    async def get(  # noqa: PLR0913
+    async def get(
         self: Self,
         url: str,
         timeout: int,  # noqa: ASYNC109
         *,
         headers: dict[str, str] | None = None,
         header_scope: str | None = None,
-        tabs_till_verify: int | None = None,
         solve_captcha: bool = False,
     ) -> PageResponse:
         """Load *url*, optionally adding validated headers within a narrow scope.
@@ -174,12 +162,9 @@ class PageHandler:
         ``document`` scope modifies only the initial main-frame navigation. An
         ``origin`` scope modifies requests whose scheme, host, and effective
         port exactly match *url*. Redirects and third-party subresources never
-        inherit scoped headers. When *tabs_till_verify* is set, the loaded page
-        is verified through the owned native solver before keyboard fallback,
-        and the token and live page URL are attached when available. When
-        *solve_captcha* is set, one recognized local widget is attempted after
-        the page is ready and its fresh provider
-        token is attached when available. Raises :class:`PageLoadError` on failure.
+        inherit scoped headers. With *solve_captcha*, one recognized widget is
+        attempted after the page is ready and its provider/token pair is attached.
+        Raises :class:`PageLoadError` on failure.
         """
         self._reset()
         self.url = url
@@ -192,31 +177,24 @@ class PageHandler:
                 await self._install_scoped_headers(headers, header_scope)
             await self._add_network_listeners()
             await self.tab.enable_page_events()
-            if tabs_till_verify is not None:
+            if solve_captcha:
                 await self.start_challenge_solver()
             await self.tab.go_to(self.url, timeout=round(self.get_time_left()))
 
-            if not await self._check_if_loaded(cleanup=tabs_till_verify is None):
+            if not await self._check_if_loaded(cleanup=not solve_captcha):
                 msg = f"page load check mechanism failed out for: {url}"
                 raise PageLoadError(msg)
 
             # Wait for page to load, if any redirects
             logger.info("Waiting for requested page to load...")
             await asyncio.wait_for(self._wait_page_load(), timeout=self.get_time_left())
-            token: str | None = None
             page_url: str | None = None
-            if tabs_till_verify is not None:
-                page = self._tg.ppage
-                try:
-                    token = await self.verify_turnstile(tabs_till_verify)
-                except (TimeoutError, PlaywrightTimeoutError):
-                    msg = "turnstile verification timed out"
-                    raise PageLoadError(msg) from None
-                page_url = page.url
             captcha_provider: str | None = None
             captcha_token: str | None = None
             if solve_captcha:
-                solved = await solve_visible_captcha(self._tg.ppage, self.get_time_left)
+                page = self._tg.ppage
+                solved = await solve_visible_captcha(page, self.get_time_left, turnstile_solver=self.verify_turnstile)
+                page_url = page.url
                 if solved is not None:
                     captcha_provider, captcha_token = solved
             tree = await self.build_dom_tree()
@@ -229,7 +207,6 @@ class PageHandler:
                 headers=self.response_headers,
                 user_agent=self.user_agent,
                 url=page_url or self.redirected_url,
-                turnstile_token=token,
                 captcha_provider=captcha_provider,
                 captcha_token=captcha_token,
             )
@@ -333,8 +310,8 @@ class PageHandler:
             return True, token
         return False, None
 
-    async def verify_turnstile(self: Self, tabs: int) -> str | None:
-        """Verify a fresh page token within the request deadline."""
+    async def verify_turnstile(self: Self) -> str | None:
+        """Verify a fresh Turnstile token within the request deadline."""
         async with asyncio.timeout(self.get_time_left()):
             page = self._tg.ppage
             widget = page.locator(_TURNSTILE_INPUT_SELECTOR)
@@ -344,26 +321,10 @@ class PageHandler:
             attempted, native_token = await self._verify_with_native_solver(page, initial)
             if attempted:
                 return native_token
-            anchor: JSHandle | None = None
-            try:
-                while True:
-                    if anchor is not None:
-                        await anchor.evaluate("node => node.focus()")
-                    for _ in range(tabs):
-                        await page.keyboard.press("Tab")
-                    await page.keyboard.press("Space")
-                    try:
-                        return await _wait_turnstile_token(page, initial, _TURNSTILE_RETRY_TIMEOUT_MS)
-                    except PlaywrightTimeoutError:
-                        if anchor is None:
-                            anchor = await page.evaluate_handle(_TURNSTILE_ANCHOR_EXPRESSION)
-                        continue
-            finally:
-                if anchor is not None:
-                    try:
-                        await anchor.evaluate("node => node.remove()")
-                    finally:
-                        await anchor.dispose()
+            timeout_ms = max(1, self.get_time_left() * 1000)
+            if not await find_and_click_turnstile(page, timeout_ms):
+                return None
+            return await _wait_turnstile_token(page, initial, max(1, round(self.get_time_left() * 1000)))
 
     async def snapshot(
         self: Self,
@@ -398,7 +359,6 @@ class PageHandler:
                 user_agent=source.user_agent,
                 url=source.url or page.url,
                 screenshot=screenshot,
-                turnstile_token=source.turnstile_token,
                 captcha_provider=source.captcha_provider,
                 captcha_token=source.captcha_token,
             )

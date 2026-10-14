@@ -194,8 +194,8 @@ correlates service logs; inbound values are ignored. Response JSON is unchanged.
 
 | cmd | fields |
 | --- | --- |
-| `request.get` | `url`, `maxTimeout`, `session`, `session_ttl_minutes`, `sessionMode`, `mode`, `headers`, `headerScope`, `cookies`, `returnOnlyCookies`, `waitInSeconds`, `returnScreenshot`, `disableMedia`, `tabs_till_verify`, `proxy` |
-| `request.post` | as `request.get` except `headerScope` and `tabs_till_verify`, plus `postData` (string, or object sent as JSON) |
+| `request.get` | `url`, `maxTimeout`, `session`, `session_ttl_minutes`, `sessionMode`, `mode`, `headers`, `headerScope`, `cookies`, `returnOnlyCookies`, `waitInSeconds`, `returnScreenshot`, `disableMedia`, `solveCaptcha`, `proxy` |
+| `request.post` | as `request.get` except `headerScope` and `solveCaptcha`, plus `postData` (string, or object sent as JSON) |
 | `sessions.create` | optional `session` name, optional `session_ttl_minutes`, optional `sessionMode` (`shared` or `isolated`), optional `proxy` |
 | `sessions.list` | none |
 | `sessions.destroy` | `session` |
@@ -230,14 +230,13 @@ for this fetch only. It selects browser execution in `auto` and is rejected by e
 `http`. Audio/video are unaffected. Service-worker-handled requests can bypass page
 routing; this option does not disable or modify service workers.
 
-`tabs_till_verify` is an optional nonnegative integer for browser/auto GET. It
-activates the owned Cloudflare solver before navigation and checks for a widget token.
-If needed, it clicks a unique native checkbox in a Cloudflare iframe belonging to the
-selected page and browser context; otherwise it falls back to the requested number
-of Tab presses and Space. Zero still enables verification. The response includes
-`solution.turnstile_token` only for a confirmed widget response or a changed nonempty
-input. HTTP/POST reject this option; `returnOnlyCookies` retains the token. The
-original deadline bounds interaction. PageHandler behavior can still reject a challenge.
+`solveCaptcha: true` attempts one recognized widget on browser/auto GET, including
+embedded Turnstile. Auto mode goes directly to the browser. A successful attempt
+returns `solution.captcha_provider` and `solution.captcha_token`; cookie-only replies
+retain both. Turnstile first uses the native checkbox click, then a visible-checkbox
+fallback that temporarily widens the Cloudflare frame. Interaction stays within the
+request deadline. Ordinary fetches still handle blocking Cloudflare interstitials
+automatically, but do not request embedded widget solving.
 
 Custom GET headers require an explicit `headerScope`:
 `document` applies them only to the initial main-frame navigation, while `origin` applies

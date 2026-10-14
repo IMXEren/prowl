@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
 
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
@@ -12,12 +13,17 @@ from prowl.browser.solvers.checkbox import _provider_for_frame, solve_visible_ch
 from prowl.browser.solvers.pow import solve_altcha, solve_friendly_captcha
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from playwright.async_api import Page
 
 
-async def solve_visible_captcha(page: Page, seconds_remaining: Callable[[], float]) -> tuple[str, str] | None:
+async def solve_visible_captcha(
+    page: Page,
+    seconds_remaining: Callable[[], float],
+    *,
+    turnstile_solver: Callable[[], Awaitable[str | None]] | None = None,
+) -> tuple[str, str] | None:
     """Attempt one unambiguous provider and return only a fresh response value."""
     remaining = seconds_remaining()
     if remaining <= 0:
@@ -31,7 +37,8 @@ async def solve_visible_captcha(page: Page, seconds_remaining: Callable[[], floa
                 }
                 altcha = await page.query_selector_all("altcha-widget")
                 friendly = await page.query_selector_all(".frc-captcha")
-                count = len(checkbox_providers) + len(altcha) + len(friendly)
+                turnstile = any(urlsplit(frame.url).hostname == "challenges.cloudflare.com" for frame in page.frames)
+                count = len(checkbox_providers) + len(altcha) + len(friendly) + int(turnstile)
                 if count > 1:
                     return None
                 if count == 1:
@@ -40,6 +47,9 @@ async def solve_visible_captcha(page: Page, seconds_remaining: Callable[[], floa
                 if wait <= 0:
                     return None
                 await asyncio.sleep(wait)
+            if turnstile:
+                response = await turnstile_solver() if turnstile_solver is not None else None
+                return ("turnstile", response) if response else None
             if checkbox_providers:
                 return await solve_visible_checkbox(page, seconds_remaining)
             provider, solver = ("altcha", solve_altcha) if altcha else ("friendly", solve_friendly_captcha)

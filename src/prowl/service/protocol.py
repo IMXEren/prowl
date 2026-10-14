@@ -84,7 +84,6 @@ _FETCH_FIELDS: Final[frozenset[str]] = frozenset(
         "waitInSeconds",
         "returnScreenshot",
         "disableMedia",
-        "tabs_till_verify",
         "solveCaptcha",
     },
 )
@@ -195,7 +194,6 @@ class FetchCommand:
     wait_in_seconds: float = 0.0
     return_screenshot: bool = False
     disable_media: bool = False
-    tabs_till_verify: int | None = None
     solve_captcha: bool = False
 
     @property
@@ -409,7 +407,6 @@ def _parse_fetch(payload: dict[str, Any], cmd: str) -> FetchCommand:
         wait_in_seconds=wait_in_seconds,
         return_screenshot=_parse_optional_bool(payload, "returnScreenshot"),
         disable_media=_parse_optional_bool(payload, "disableMedia"),
-        tabs_till_verify=_parse_tabs_till_verify(payload, cmd, mode),
         solve_captcha=_parse_solve_captcha(payload, cmd, mode),
     )
 
@@ -501,20 +498,6 @@ def _parse_execution_mode(payload: dict[str, Any]) -> ExecutionMode:
         msg = "mode must be 'browser', 'http' or 'auto'"
         raise ProtocolError(msg, http_status=400)
     return cast("ExecutionMode", value)
-
-
-def _parse_tabs_till_verify(payload: dict[str, Any], cmd: str, mode: ExecutionMode) -> int | None:
-    """Validate an optional nonnegative Tab count for browser or auto GET."""
-    if "tabs_till_verify" not in payload:
-        return None
-    if cmd != CMD_REQUEST_GET or mode == HTTP_MODE:
-        msg = "explicit verification requires browser or auto GET"
-        raise ProtocolError(msg, http_status=400)
-    value = payload["tabs_till_verify"]
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        msg = "tabs_till_verify must be a nonnegative integer"
-        raise ProtocolError(msg, http_status=400)
-    return value
 
 
 def _parse_solve_captcha(payload: dict[str, Any], cmd: str, mode: ExecutionMode) -> bool:
@@ -841,13 +824,12 @@ def solution_payload(  # noqa: PLR0913
     user_agent: str,
     execution: dict[str, Any] | None = None,
     screenshot: str | None = None,
-    turnstile_token: str | None = None,
     captcha_provider: str | None = None,
     captcha_token: str | None = None,
 ) -> dict[str, Any]:
     """Build the FlareSolverr ``solution`` object.
 
-    ``execution``, ``screenshot`` and ``turnstile_token`` are optional. Omitting them keeps the
+    ``execution``, ``screenshot`` and CAPTCHA fields are optional. Omitting them keeps the
     object exactly the shape a browser fetch has always reported.
     """
     solution = {
@@ -862,8 +844,6 @@ def solution_payload(  # noqa: PLR0913
         solution["execution"] = execution
     if screenshot is not None:
         solution["screenshot"] = screenshot
-    if turnstile_token is not None:
-        solution["turnstile_token"] = turnstile_token
     if captcha_provider is not None and captcha_token is not None:
         solution["captcha_provider"] = captcha_provider
         solution["captcha_token"] = captcha_token

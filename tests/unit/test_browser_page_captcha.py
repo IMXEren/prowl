@@ -227,3 +227,41 @@ class VisibleCaptchaDispatchTests(IsolatedAsyncioTestCase):
         with patch("prowl.browser.solvers.dispatch.solve_friendly_captcha", AsyncMock(return_value=None)) as solve:
             self.assertIsNone(await solve_visible_captcha(page, lambda: 5.0))
             solve.assert_awaited_once()
+
+    async def test_turnstile_returns_shared_provider_pair(self) -> None:
+        page = _page([_frame("https://challenges.cloudflare.com/widget", _checkbox())], AsyncMock())
+        solve = AsyncMock(return_value="fresh-token")
+        self.assertEqual(
+            await solve_visible_captcha(page, lambda: 5.0, turnstile_solver=solve),
+            ("turnstile", "fresh-token"),
+        )
+        solve.assert_awaited_once_with()
+
+    async def test_turnstile_without_token_or_adapter_reports_no_success(self) -> None:
+        page = _page([_frame("https://challenges.cloudflare.com/widget", _checkbox())], AsyncMock())
+        solve = AsyncMock(return_value=None)
+        self.assertIsNone(await solve_visible_captcha(page, lambda: 5.0, turnstile_solver=solve))
+        self.assertIsNone(await solve_visible_captcha(page, lambda: 5.0))
+
+    async def test_spoofed_cloudflare_frame_never_reaches_solver(self) -> None:
+        page = _page([_frame("https://challenges.cloudflare.com.attacker.invalid/widget", _checkbox())], AsyncMock())
+        solve = AsyncMock()
+        self.assertIsNone(await solve_visible_captcha(page, lambda: 0.01, turnstile_solver=solve))
+        solve.assert_not_awaited()
+
+    async def test_mixed_turnstile_and_checkbox_providers_are_refused(self) -> None:
+        page = _page(
+            [_frame("https://challenges.cloudflare.com/widget", _checkbox()), _frame(_RECAPTCHA_URL, _checkbox())],
+            AsyncMock(),
+        )
+        solve = AsyncMock()
+        self.assertIsNone(await solve_visible_captcha(page, lambda: 5.0, turnstile_solver=solve))
+        solve.assert_not_awaited()
+
+    async def test_turnstile_timeout_returns_no_token_and_cancellation_propagates(self) -> None:
+        page = _page([_frame("https://challenges.cloudflare.com/widget", _checkbox())], AsyncMock())
+        solve = AsyncMock(side_effect=TimeoutError)
+        self.assertIsNone(await solve_visible_captcha(page, lambda: 5.0, turnstile_solver=solve))
+        solve.side_effect = asyncio.CancelledError
+        with self.assertRaises(asyncio.CancelledError):
+            await solve_visible_captcha(page, lambda: 5.0, turnstile_solver=solve)

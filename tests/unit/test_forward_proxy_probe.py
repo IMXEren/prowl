@@ -263,7 +263,8 @@ class VerificationProbeTests(IsolatedAsyncioTestCase):
             if "/widget" in url:
                 observed.append(url.removeprefix("https://fixture.invalid"))
                 solution.update(
-                    turnstile_token=verification_value,
+                    captcha_provider="turnstile",
+                    captcha_token=verification_value,
                     screenshot=base64.b64encode(png).decode("ascii"),
                     cookies=[{"name": "widgetdone", "value": "1"}],
                     response="" if command["returnOnlyCookies"] else "Verified locally",
@@ -276,5 +277,5 @@ class VerificationProbeTests(IsolatedAsyncioTestCase):
         )
         self.assertEqual(service.handle.await_count, 3)
         commands = [call.args[0] for call in service.handle.await_args_list]
-        self.assertEqual([command["tabs_till_verify"] for command in commands], [1, 0, 0])
+        self.assertEqual([command["solveCaptcha"] for command in commands], [True, True, True])
         self.assertTrue(commands[1]["returnOnlyCookies"])

@@ -1,10 +1,4 @@
-"""Explicit-verification seam: a GET may request native keyboard verification.
-
-The option is carried on ``FetchRequest.tabs_till_verify`` and surfaced on
-``FetchResult.turnstile_token``. These tests use the real ``PageResponse``/``FetchRequest``/
-``FetchResult`` shapes and reuse the ``_SnapshotFixture`` mocks from
-``test_service_browser_snapshot``; no browser is launched and nothing external is contacted.
-"""
+"""Turnstile uses the shared CAPTCHA request and response fields."""
 
 from __future__ import annotations
 
@@ -18,7 +12,7 @@ from prowl.service.backend import FetchRequest
 from prowl.service.errors import CallerSafeError
 from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
 
-VERIFY_ERROR = "explicit verification requires browser or auto GET"
+VERIFY_ERROR = "captcha solving requires browser or auto GET"
 TOKEN = "turnstile-token"  # noqa: S105 - a test fixture value, not a credential
 LATE_TOKEN = "late-token"  # noqa: S105
 LIVE_URL = "https://example.com/verified"
@@ -33,29 +27,30 @@ def _verified(*, url: str = LIVE_URL, screenshot: str | None = None, token: str 
         user_agent="Mozilla/5.0 (Browser)",
         url=url,
         screenshot=screenshot,
-        turnstile_token=token,
+        captcha_provider="turnstile" if token else None,
+        captcha_token=token,
     )
 
 
 class ExplicitVerificationForwardingTests(_SnapshotFixture):
     """The verification option reaches the native GET once, with the caller headers."""
 
-    async def test_zero_tabs_and_headers_reach_site_get_once(self) -> None:
+    async def test_captcha_flag_and_headers_reach_site_get_once(self) -> None:
         backend, group, site, events = self._backend(post_source=_verified())
 
         result = await backend.fetch(
             None,
-            FetchRequest(url=WARM_ROOT, headers={"X-Test": "1"}, tabs_till_verify=0),
+            FetchRequest(url=WARM_ROOT, headers={"X-Test": "1"}, solve_captcha=True),
         )
 
         self.assertEqual(site.get.await_count, 1)
         self.assertEqual(site.get.await_args.args, (WARM_ROOT, 60))
         self.assertEqual(
             site.get.await_args.kwargs,
-            {"headers": {"X-Test": "1"}, "header_scope": None, "tabs_till_verify": 0},
+            {"headers": {"X-Test": "1"}, "header_scope": None, "solve_captcha": True},
         )
         self.assertEqual(events, ["get", "cookies"])
-        self.assertEqual(result.turnstile_token, TOKEN)
+        self.assertEqual(result.captcha_token, TOKEN)
         self.assertEqual(result.url, LIVE_URL)
         self.assertEqual(group.quit.await_count, 1)
 
@@ -68,7 +63,7 @@ class ExplicitVerificationForwardingTests(_SnapshotFixture):
         self.assertEqual(site.get.await_args.args, (WARM_ROOT, 60))
         self.assertEqual(site.get.await_args.kwargs, {})
         self.assertEqual(events, ["get", "cookies"])
-        self.assertIsNone(result.turnstile_token)
+        self.assertIsNone(result.captcha_token)
         self.assertIsNone(result.screenshot)
         self.assertIsNone(result.body_bytes)
         self.assertIsNone(result.header_items)
@@ -92,12 +87,12 @@ class ExplicitVerificationCaptureTests(_SnapshotFixture):
 
         result = await backend.fetch(
             None,
-            FetchRequest(url=WARM_ROOT, tabs_till_verify=2, wait_in_seconds=0.5, return_screenshot=True),
+            FetchRequest(url=WARM_ROOT, solve_captcha=True, wait_in_seconds=0.5, return_screenshot=True),
         )
 
         self.assertEqual(events, ["get", "snapshot", "cookies"])
-        self.assertEqual(site.snapshot.await_args.args[0].turnstile_token, TOKEN)
-        self.assertEqual(result.turnstile_token, LATE_TOKEN)
+        self.assertEqual(site.snapshot.await_args.args[0].captcha_token, TOKEN)
+        self.assertEqual(result.captcha_token, LATE_TOKEN)
         self.assertEqual(result.url, "https://example.com/final")
         self.assertEqual(result.screenshot, SCREENSHOT)
         self.assertEqual([cookie["name"] for cookie in result.cookies], ["cf_clearance"])
@@ -112,17 +107,17 @@ class AutoVerificationRoutingTests(_SnapshotFixture):
         http_stage = AsyncMock()
         backend._http_stage = http_stage
 
-        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=AUTO_MODE, tabs_till_verify=1))
+        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=AUTO_MODE, solve_captcha=True))
 
         http_stage.assert_not_awaited()
         self.assertEqual(backend.metrics.http_fastpath_total, 0)
         self.assertEqual(backend.metrics.browser_escalations_total, 0)
         self.owner.get_context.assert_awaited_once_with(None)
         self.owner.create.assert_awaited_once_with(context=self.handle)
-        self.assertEqual(site.get.await_args.kwargs["tabs_till_verify"], 1)
+        self.assertEqual(site.get.await_args.kwargs["solve_captcha"], True)
         self.assertEqual(events, ["get", "cookies"])
         self.assertEqual(result.mode, BROWSER_MODE)
-        self.assertEqual(result.turnstile_token, TOKEN)
+        self.assertEqual(result.captcha_token, TOKEN)
         self.assertEqual(group.quit.await_count, 1)
 
 
@@ -139,7 +134,7 @@ class ExplicitVerificationGuardTests(_SnapshotFixture):
         backend._pool.acquire = pool_acquire
 
         with self.assertRaises(CallerSafeError) as caught:
-            await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=HTTP_MODE, tabs_till_verify=1))
+            await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=HTTP_MODE, solve_captcha=True))
 
         self.assertEqual(str(caught.exception), VERIFY_ERROR)
         steal.assert_not_awaited()
@@ -153,7 +148,7 @@ class ExplicitVerificationGuardTests(_SnapshotFixture):
         backend._steal_least_recent = steal
 
         with self.assertRaises(CallerSafeError) as caught:
-            await backend.fetch(None, FetchRequest(url=WARM_ROOT, method="POST", tabs_till_verify=1))
+            await backend.fetch(None, FetchRequest(url=WARM_ROOT, method="POST", solve_captcha=True))
 
         self.assertEqual(str(caught.exception), VERIFY_ERROR)
         steal.assert_not_awaited()
@@ -167,7 +162,7 @@ class ExplicitVerificationCleanupTests(_SnapshotFixture):
         site.get = AsyncMock(side_effect=RuntimeError("boom"))
 
         with self.assertRaises(RuntimeError):
-            await backend.fetch(None, FetchRequest(url=WARM_ROOT, tabs_till_verify=1))
+            await backend.fetch(None, FetchRequest(url=WARM_ROOT, solve_captcha=True))
 
         self.assertEqual(site.get.await_count, 1)
         self.assertEqual(group.quit.await_count, 1)
@@ -177,7 +172,7 @@ class ExplicitVerificationCleanupTests(_SnapshotFixture):
         site.get = AsyncMock(side_effect=asyncio.CancelledError())
 
         with self.assertRaises(asyncio.CancelledError):
-            await backend.fetch(None, FetchRequest(url=WARM_ROOT, tabs_till_verify=1))
+            await backend.fetch(None, FetchRequest(url=WARM_ROOT, solve_captcha=True))
 
         self.assertEqual(site.get.await_count, 1)
         self.assertEqual(group.quit.await_count, 1)

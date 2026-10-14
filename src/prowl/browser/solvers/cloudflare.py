@@ -8,7 +8,7 @@ response and the loaded DOM remain the authority on success.
 from typing import Protocol
 from urllib.parse import urlsplit
 
-from playwright.async_api import Page
+from playwright.async_api import ElementHandle, Locator, Page
 from pydoll.browser.tab import Tab
 from pydoll.commands.dom_commands import DomCommands
 from pydoll.commands.target_commands import TargetCommands
@@ -101,3 +101,43 @@ async def click_embedded_turnstile(tab: Tab, page: Page) -> bool:
     finally:
         for session in reversed(sessions):
             await tab._execute_command(TargetCommands.detach_from_target(session))  # noqa: SLF001
+
+
+async def find_and_click_turnstile(page: Page, timeout_ms: float) -> bool:
+    """Widen the single visible Cloudflare checkbox frame and click its control."""
+    candidates: list[tuple[ElementHandle, Locator]] = []
+    elements: list[ElementHandle] = []
+    try:
+        for frame in page.frames:
+            if urlsplit(frame.url).hostname != "challenges.cloudflare.com":
+                continue
+            element = await frame.frame_element()
+            elements.append(element)
+            if not await element.is_visible():
+                continue
+            checkboxes = frame.get_by_role("checkbox")
+            for index in range(await checkboxes.count()):
+                checkbox = checkboxes.nth(index)
+                if await checkbox.is_visible():
+                    candidates.append((element, checkbox))
+        if len(candidates) != 1:
+            return False
+        element, checkbox = candidates[0]
+        width = await element.evaluate(
+            "node => [node.style.getPropertyValue('width'), node.style.getPropertyPriority('width')]"
+        )
+        try:
+            await element.evaluate("node => node.style.setProperty('width', '300px', 'important')")
+            await checkbox.click(timeout=timeout_ms)
+            return True
+        finally:
+            await element.evaluate(
+                "(node, width) => {"
+                " if (width[0]) node.style.setProperty('width', width[0], width[1]);"
+                " else node.style.removeProperty('width');"
+                " }",
+                width,
+            )
+    finally:
+        for element in reversed(elements):
+            await element.dispose()

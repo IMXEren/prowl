@@ -519,7 +519,6 @@ class Service:
                 wait_in_seconds=0.0 if command.return_only_cookies else command.wait_in_seconds,
                 return_screenshot=command.return_screenshot,
                 disable_media=command.disable_media,
-                tabs_till_verify=command.tabs_till_verify,
                 solve_captcha=command.solve_captcha,
             )
             return await asyncio.wait_for(
@@ -538,7 +537,6 @@ class Service:
             user_agent=result.user_agent or "",
             execution=execution_payload(result.mode, result.classification),
             screenshot=result.screenshot if command.return_screenshot else None,
-            turnstile_token=result.turnstile_token if command.tabs_till_verify is not None else None,
             captcha_provider=result.captcha_provider if command.solve_captcha else None,
             captcha_token=result.captcha_token if command.solve_captcha else None,
         )
