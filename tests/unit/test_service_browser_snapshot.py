@@ -104,7 +104,7 @@ class LegacyDefaultsTests(_SnapshotFixture):
 
     async def test_defaults_do_not_request_a_snapshot(self) -> None:
         backend, group, site, events = self._backend()
-        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT))
+        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=BROWSER_MODE))
 
         self.assertEqual(site.snapshot.await_count, 0)
         self.assertEqual(site.get.await_count, 1)

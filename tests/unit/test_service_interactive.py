@@ -582,7 +582,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         backend, _groups = self._backend(created=created)
         with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))
-            await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo"))
         # One browser was created for the egress, so the tab and the fetch share a profile.
         self.assertEqual(created, ["decodo"])
         await backend.aclose()
@@ -712,7 +712,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         backend, groups = self._backend(idle_seconds=0.01)
         with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/"))).tab
-            await backend.fetch(None, FetchRequest(url="https://example.com/"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         await asyncio.sleep(0.15)
         self.assertEqual(await backend.list_interactive(), [])
         fetch_group = next(group for group in groups if group is not groups[0])
@@ -782,7 +782,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         backend, groups = self._backend(max_concurrency=1, steal_least_recent=True)
         with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/"))).tab
-            await backend.fetch(None, FetchRequest(url="https://example.com/"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(groups[0].quit_calls, 0)
         self.assertEqual([entry.tab_id for entry in await backend.list_interactive()], [tab.tab_id])
         await backend.aclose()
@@ -811,11 +811,13 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         site = GatedSite()
         backend, _groups = self._backend(max_concurrency=1, steal_least_recent=True)
         with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: site):
-            first = asyncio.create_task(backend.fetch(None, FetchRequest(url="https://example.com/one")))
+            first = asyncio.create_task(
+                backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/one"))
+            )
             await asyncio.wait_for(entered.wait(), timeout=2.0)
             # One fetch is already in flight with no tab open, which is the saturated state the
             # takeover used to raise IndexError on.
-            second = await backend.fetch(None, FetchRequest(url="https://example.com/two"))
+            second = await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/two"))
             release.set()
             await first
         self.assertEqual(second.status_code, 200)

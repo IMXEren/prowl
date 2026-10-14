@@ -97,7 +97,7 @@ class CheckboxCaptchaResultTests(_SnapshotFixture):
     async def test_solve_result_carries_the_provider_and_token(self) -> None:
         backend, group, site, events = self._backend(post_source=_solved())
 
-        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, solve_captcha=True))
+        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=BROWSER_MODE, solve_captcha=True))
 
         self.assertEqual(site.get.await_count, 1)
         self.assertEqual(site.get.await_args.args, (WARM_ROOT, 60))
@@ -111,7 +111,7 @@ class CheckboxCaptchaResultTests(_SnapshotFixture):
     async def test_absent_option_keeps_the_legacy_call_and_shape(self) -> None:
         backend, _group, site, events = self._backend(post_source=_solved())
 
-        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT))
+        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=BROWSER_MODE))
 
         self.assertEqual(site.get.await_count, 1)
         self.assertEqual(site.get.await_args.args, (WARM_ROOT, 60))

@@ -662,7 +662,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
             patch.object(backend_module, "Browser", FakeBrowser),
             patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _FakeSite()),
         ):
-            await backend.fetch(None, FetchRequest(url="https://example.com/"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(calls, ["start", "create"])
 
     async def test_named_egress_uses_its_own_browser(self) -> None:
@@ -694,7 +694,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
             patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create),
             patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _FakeSite()),
         ):
-            await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo"))
             await backend.aclose()
         self.assertEqual(calls, ["start:decodo", "create:decodo", "shutdown:decodo"])
 
@@ -703,7 +703,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
 
         backend = backend_module.BrowserBackend()
         with self.assertRaises(EgressError):
-            await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo"))
 
     async def test_a_named_egress_start_failure_releases_the_claim(self) -> None:
         """A start that fails before any group exists still owes the egress claim back."""
@@ -736,7 +736,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
             patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create),
             self.assertRaises(RuntimeError),
         ):
-            await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo"))
         # Releasing the claim lets the pool idle the egress browser out again.
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, ["decodo"])
@@ -771,7 +771,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
             patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create),
             self.assertRaises(RuntimeError),
         ):
-            await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo"))
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, ["decodo"])
         await backend.aclose()
@@ -806,7 +806,7 @@ class EgressBackendRoutingTests(IsolatedAsyncioTestCase):
         backend = backend_module.BrowserBackend(egresses={"decodo": _EGRESS_URL}, egress_idle_seconds=0.01)
         with patch("prowl.browser.proxy.egress.create_egress_browser", side_effect=_create):
             task = asyncio.create_task(
-                backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo")),
+                backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo")),
             )
             await asyncio.wait_for(entered.wait(), timeout=2.0)
             task.cancel()

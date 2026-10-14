@@ -217,7 +217,7 @@ async def _wait_until(predicate: Callable[[], bool], *, attempts: int = 400) -> 
 
 
 def _isolated(url: str = "https://example.com/") -> FetchRequest:
-    return FetchRequest(url=url, egress="decodo", session_id="s1", session_mode=ISOLATED_MODE)
+    return FetchRequest(mode="browser", url=url, egress="decodo", session_id="s1", session_mode=ISOLATED_MODE)
 
 
 class IsolatedContextRecoveryTests(_RecoveryFixture):

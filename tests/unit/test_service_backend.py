@@ -161,7 +161,7 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
     async def test_fetch_creates_and_quits_group_on_success(self) -> None:
         site = FakeSite(_source())
         backend, browser, group = self._install(site)
-        result = await backend.fetch("s", FetchRequest(url="https://example.com/"))
+        result = await backend.fetch("s", FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(result.status_code, 200)
         self.assertEqual(browser.create_calls, 1)
         self.assertEqual(group.quit_calls, 1)
@@ -170,21 +170,21 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         site = FakeSite(_source(), error=RuntimeError("boom"))
         backend, _browser, group = self._install(site)
         with self.assertRaises(RuntimeError):
-            await backend.fetch(None, FetchRequest(url="https://example.com/"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(group.quit_calls, 1)
 
     async def test_fetch_quits_group_on_cancellation(self) -> None:
         site = FakeSite(_source(), error=asyncio.CancelledError())
         backend, _browser, group = self._install(site)
         with self.assertRaises(asyncio.CancelledError):
-            await backend.fetch(None, FetchRequest(url="https://example.com/"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(group.quit_calls, 1)
 
     async def test_no_group_is_retained_between_fetches(self) -> None:
         site = FakeSite(_source())
         backend, browser, group = self._install(site)
-        await backend.fetch("s", FetchRequest(url="https://example.com/"))
-        await backend.fetch("s", FetchRequest(url="https://example.com/"))
+        await backend.fetch("s", FetchRequest(mode="browser", url="https://example.com/"))
+        await backend.fetch("s", FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(browser.create_calls, 2)
         self.assertEqual(group.quit_calls, 2)
 
@@ -192,7 +192,7 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         site = FakeSite(_source())
         cookies = [{"name": "a", "value": "b", "domain": ".example.com"}]
         backend, _browser, group = self._install(site, [CF_COOKIE])
-        await backend.fetch(None, FetchRequest(url="https://example.com/", cookies=cookies))
+        await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", cookies=cookies))
         self.assertEqual(group.tab.cookies, cookies)
 
     async def test_get_forwards_validated_scoped_headers_to_site(self) -> None:
@@ -201,6 +201,7 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         await backend.fetch(
             None,
             FetchRequest(
+                mode="browser",
                 url="https://example.com/",
                 headers={"authorization": "Bearer token"},
                 header_scope="document",
@@ -217,6 +218,7 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         await backend.fetch(
             None,
             FetchRequest(
+                mode="browser",
                 url="https://example.com/api",
                 method="POST",
                 post_data="q=1",
@@ -230,8 +232,8 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         site = FakeSite(_source(), delay=0.05)
         backend, _browser, _group = self._install(site)
         await asyncio.gather(
-            backend.fetch(None, FetchRequest(url="https://example.com/a")),
-            backend.fetch(None, FetchRequest(url="https://example.com/b")),
+            backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/a")),
+            backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/b")),
         )
         self.assertEqual(site.max_active, 2)
 
@@ -239,8 +241,8 @@ class BrowserBackendLifecycleTests(IsolatedAsyncioTestCase):
         site = FakeSite(_source(), delay=0.05)
         backend, _browser, _group = self._install(site)
         await asyncio.gather(
-            backend.fetch("s", FetchRequest(url="https://example.com/a")),
-            backend.fetch("s", FetchRequest(url="https://example.com/b")),
+            backend.fetch("s", FetchRequest(mode="browser", url="https://example.com/a")),
+            backend.fetch("s", FetchRequest(mode="browser", url="https://example.com/b")),
         )
         self.assertEqual(site.max_active, 2)
 

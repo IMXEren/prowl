@@ -1,6 +1,6 @@
 """Backend execution-mode routing regressions with stub browsers and injectable HTTP clients.
 
-The default ``browser`` mode must keep its legacy result shape and its fake-owner contract. The
+Explicit ``browser`` mode must keep its legacy result shape and its fake-owner contract. The
 ``http`` and ``auto`` modes resolve one owner and context per route, hold a single named egress
 claim across an HTTP attempt and a browser escalation, seed supplied cookies once, and classify
 the final response honestly. No browser is launched and no network is touched.
@@ -328,7 +328,7 @@ def _counting(backend: BrowserBackend) -> tuple[list[str], list[str]]:
 
 
 class BrowserModeBypassTests(_RoutingFixture):
-    """The default browser mode keeps its legacy shape and never reaches the HTTP path."""
+    """Explicit browser mode keeps its legacy shape and never reaches the HTTP path."""
 
     async def test_browser_mode_never_uses_the_http_path(self) -> None:
         backend, recorder, clients, _site = self._backend()
@@ -390,6 +390,28 @@ class HttpModeGuardsTests(_RoutingFixture):
 
 class AutoRoutingTests(_RoutingFixture):
     """Auto tries HTTP and escalates for exactly the classifications and refusals that need one."""
+
+    async def test_default_get_uses_http_without_browser_navigation(self) -> None:
+        client = _StubHttpClient(result=_http_result())
+        backend, recorder, _clients, _site = self._backend(http_client=client)
+        self.addAsyncCleanup(backend.aclose)
+
+        result = await backend.fetch(None, FetchRequest(url="https://example.com/"))
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(recorder.groups, [])
+        self.assertEqual(result.mode, HTTP_MODE)
+
+    async def test_default_post_uses_browser_without_an_http_attempt(self) -> None:
+        client = _StubHttpClient(result=_http_result())
+        backend, recorder, _clients, _site = self._backend(http_client=client)
+        self.addAsyncCleanup(backend.aclose)
+
+        result = await backend.fetch(None, FetchRequest(url="https://example.com/", method="POST", post_data="q=1"))
+
+        self.assertEqual(client.calls, [])
+        self.assertEqual(len(recorder.groups), 1)
+        self.assertEqual(result.mode, BROWSER_MODE)
 
     async def test_auto_challenge_escalates_and_classifies_the_browser_result(self) -> None:
         client = _StubHttpClient(result=_http_result(status=403, body=_CAPTCHA_BODY))

@@ -204,7 +204,7 @@ correlates service logs; inbound values are ignored. Response JSON is unchanged.
 | `browser.list` | optional `tab`; refreshing only the named tab keeps it alive |
 | `cookies.list` | optional `url` (only the cookies the browser would send there), optional `session` (read that session's own context), `proxy` |
 
-Fetches accept `mode: browser|http|auto`; omitted means `browser`. `http` uses an
+Fetches accept `mode: browser|http|auto`; omitted means `auto`. Explicit `browser` always uses the browser. `http` uses an
 identity-matched HTTP client and never escalates. `auto` tries HTTP for GETs and uses the
 selected browser context for explicit challenges or unsupported HTTP identity/cookie
 semantics. Auto POST goes directly to the browser, preventing speculative replay.

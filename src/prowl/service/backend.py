@@ -14,11 +14,10 @@ An interactive tab is the one case where a group outlives its command: it is ope
  challenge has to be the clearance the fetches then use. While a tab is open the backend
  holds the egress claim, so the pool cannot idle that browser out from under it.
 
-A fetch's execution mode decides how it reaches the network. The default ``browser`` mode
- keeps driving the browser exactly as it always has. ``http`` answers from the
- identity-matched HTTP fast path and never escalates. ``auto`` tries HTTP first and escalates
-to the browser only for a response that genuinely needs one, reusing the same context and
-held egress claim for both stages.
+A fetch defaults to ``auto``, trying eligible GETs through the identity-matched HTTP
+transport and escalating when browser work is needed, reusing the selected context and
+egress claim. ``browser`` always uses the browser; ``http`` never escalates. Auto POSTs
+use the browser directly to avoid replay.
 """
 
 from __future__ import annotations
@@ -115,7 +114,7 @@ _TITLE_RE: Final[re.Pattern[str]] = re.compile(r"<title[^>]*>(.*?)</title>", re.
 
 @dataclass(slots=True)
 class FetchRequest:
-    """A validated fetch to execute in the browser."""
+    """A validated fetch to execute through the selected mode."""
 
     url: str
     method: str = "GET"
@@ -127,7 +126,7 @@ class FetchRequest:
     egress: str = DEFAULT_EGRESS_NAME
     session_id: str | None = None
     session_mode: SessionMode = SHARED_MODE
-    mode: ExecutionMode = BROWSER_MODE
+    mode: ExecutionMode = AUTO_MODE
     body_bytes: bytes | None = None
     cookie_header: str | None = None
     wait_in_seconds: float = 0.0

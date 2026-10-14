@@ -53,7 +53,7 @@ def _http_result(*, status: int = 200, body: str = _PLAIN_BODY) -> HttpResult:
 
 
 def _request(**fields: Any) -> FetchRequest:
-    values: dict[str, Any] = {"url": "https://example.com/"}
+    values: dict[str, Any] = {"url": "https://example.com/", "mode": BROWSER_MODE}
     values.update(fields)
     return FetchRequest(**values)
 
@@ -415,7 +415,7 @@ class GroupAcquisitionMetricTests(_MetricsFixture):
 
 
 class DefaultBrowserShapeTests(_MetricsFixture):
-    """The default browser fetch keeps its legacy result shape while counting one request."""
+    """Explicit browser mode keeps its legacy result shape while counting one request."""
 
     async def test_browser_mode_keeps_its_legacy_result_shape(self) -> None:
         backend, metrics, _creates, _groups, _clients, _handles = self._backend()

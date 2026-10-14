@@ -21,7 +21,7 @@ Screenshot, delayed-snapshot, media-filter, and explicit-verification requests r
 
 ### Execution mode
 
-Omitting `mode` uses the browser, preserving the original fetch behavior. `http` uses the identity-matched HTTP transport without browser fallback. `auto` can try HTTP first and escalate when browser work is required.
+Omitting `mode` now selects `auto`: eligible GETs try HTTP first and escalate when browser work is required. Use explicit `browser` to retain browser-only behavior, including JavaScript rendering. `http` uses the identity-matched HTTP transport without browser fallback. Auto POSTs go directly to the browser to avoid replay.
 
 The JSON POST API remains separate from the forward proxy's raw-body POST path. Raw proxy POSTs use HTTP only and are never replayed through the browser.
 

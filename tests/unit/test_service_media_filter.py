@@ -56,7 +56,7 @@ class MediaFilterScopeTests(_SnapshotFixture):
         media_filter = Mock()
         site.media_filter = media_filter
 
-        await backend.fetch(None, FetchRequest(url=WARM_ROOT))
+        await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=BROWSER_MODE))
 
         media_filter.assert_not_called()
         self.assertEqual(events, ["get", "cookies"])

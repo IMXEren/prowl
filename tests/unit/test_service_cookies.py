@@ -670,6 +670,6 @@ class CookieBackendTests(_BackendFixture):
         with self._patch_site(events):
             await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))
             await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))
-            await backend.fetch(None, FetchRequest(url="https://example.com/", egress="decodo"))
+            await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/", egress="decodo"))
         self.assertEqual(created, ["decodo"])
         await backend.aclose()

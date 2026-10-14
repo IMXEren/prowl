@@ -102,15 +102,15 @@ def _solution(**overrides: Any) -> dict[str, Any]:
 
 
 class FetchModeParsingTests(TestCase):
-    """The wire accepts exactly the three fetch modes and defaults to the browser."""
+    """The wire accepts exactly the three fetch modes and defaults to auto."""
 
     def test_the_wire_accepts_only_the_three_modes(self) -> None:
         self.assertEqual(EXECUTION_MODES, {"browser", "http", "auto"})
 
-    def test_omitted_mode_is_the_browser(self) -> None:
+    def test_omitted_mode_is_auto(self) -> None:
         command = parse_request(GET)
         assert isinstance(command, FetchCommand)
-        self.assertEqual(command.mode, BROWSER_MODE)
+        self.assertEqual(command.mode, AUTO_MODE)
 
     def test_every_mode_is_accepted(self) -> None:
         for mode in ("browser", "http", "auto"):
@@ -153,12 +153,12 @@ class FetchModeParsingTests(TestCase):
 class FetchModeForwardingTests(IsolatedAsyncioTestCase):
     """The command's mode reaches the backend request inside the request's own lease."""
 
-    async def test_default_mode_reaches_the_backend_as_the_browser(self) -> None:
+    async def test_default_mode_reaches_the_backend_as_auto(self) -> None:
         backend = RecordingBackend()
         await Service(_config(), backend).handle(GET)
         ((session, request),) = backend.requests
         self.assertIsNone(session)
-        self.assertEqual(request.mode, BROWSER_MODE)
+        self.assertEqual(request.mode, AUTO_MODE)
         self.assertEqual(request.session_mode, SHARED_MODE)
         self.assertEqual(request.egress, DEFAULT_EGRESS_NAME)
 
@@ -285,16 +285,16 @@ class FetchDiagnosticsResponseTests(IsolatedAsyncioTestCase):
 
 
 class LegacyConstructorTests(TestCase):
-    """Positional construction and browser-only defaults stay compatible."""
+    """Positional construction remains supported with auto defaults."""
 
     def test_fetch_command_positional_fields_still_construct(self) -> None:
         command = FetchCommand("request.get", "https://example.com/", 60_000)
-        self.assertEqual(command.mode, BROWSER_MODE)
+        self.assertEqual(command.mode, AUTO_MODE)
         self.assertIsNone(command.proxy)
 
-    def test_fetch_request_defaults_to_the_browser(self) -> None:
-        self.assertEqual(FetchRequest("https://example.com/").mode, BROWSER_MODE)
-        self.assertEqual(FetchRequest("https://example.com/", "POST").mode, BROWSER_MODE)
+    def test_fetch_request_defaults_to_auto(self) -> None:
+        self.assertEqual(FetchRequest("https://example.com/").mode, AUTO_MODE)
+        self.assertEqual(FetchRequest("https://example.com/", "POST").mode, AUTO_MODE)
 
     def test_fetch_result_positional_fields_still_construct(self) -> None:
         result = FetchResult("https://example.com/", 200, {}, "<html></html>", [], "Mozilla/5.0 (Test)")

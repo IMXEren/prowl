@@ -126,7 +126,7 @@ HTTP_MODE: Final[ExecutionMode] = "http"
 #: HTTP first, with a browser escalation on a browser-required classification.
 AUTO_MODE: Final[ExecutionMode] = "auto"
 
-#: Fetch modes the wire accepts. An omitted ``mode`` means :data:`BROWSER_MODE`.
+#: Fetch modes the wire accepts. An omitted ``mode`` means :data:`AUTO_MODE`.
 EXECUTION_MODES: Final[frozenset[str]] = frozenset({BROWSER_MODE, HTTP_MODE, AUTO_MODE})
 
 #: Fields the ``proxy`` object may carry: a configured url, or a configured name.
@@ -190,7 +190,7 @@ class FetchCommand:
     post_data: str | None = None
     return_only_cookies: bool = False
     proxy: ProxySelection | None = None
-    mode: ExecutionMode = BROWSER_MODE
+    mode: ExecutionMode = AUTO_MODE
     wait_in_seconds: float = 0.0
     return_screenshot: bool = False
     disable_media: bool = False
@@ -484,7 +484,7 @@ def _parse_session_mode(value: Any) -> SessionMode | None:
 
 
 def _parse_execution_mode(payload: dict[str, Any]) -> ExecutionMode:
-    """Read a fetch's optional ``mode``, which defaults to the browser when it is absent.
+    """Read a fetch's optional ``mode``, which defaults to auto when it is absent.
 
     An explicit ``null`` is rejected rather than read as the default, so a caller that means the
     default omits the field.
@@ -492,7 +492,7 @@ def _parse_execution_mode(payload: dict[str, Any]) -> ExecutionMode:
     :raises ProtocolError: when a present value is not ``browser``, ``http`` or ``auto``.
     """
     if "mode" not in payload:
-        return BROWSER_MODE
+        return AUTO_MODE
     value = payload["mode"]
     if not isinstance(value, str) or value not in EXECUTION_MODES:
         msg = "mode must be 'browser', 'http' or 'auto'"

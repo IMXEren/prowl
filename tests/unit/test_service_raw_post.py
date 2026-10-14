@@ -249,7 +249,7 @@ class FetchRequestShapeTests(TestCase):
         request = FetchRequest("https://example.com/")
 
         self.assertIsNone(request.body_bytes)
-        self.assertEqual(request.mode, BROWSER_MODE)
+        self.assertEqual(request.mode, AUTO_MODE)
         fields = list(FetchRequest.__dataclass_fields__)
         self.assertEqual(fields[fields.index("body_bytes") + 1], "cookie_header")
         self.assertEqual(

@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from prowl.service.app import Service, ServiceConfig
 from prowl.service.backend import Backend, FetchRequest, FetchResult
 from prowl.service.errors import CallerSafeError
-from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, FetchCommand, parse_request
+from prowl.service.protocol import AUTO_MODE, FetchCommand, parse_request
 from prowl.service.sessions import ISOLATED_MODE, _Entry
 
 _EGRESS_URL = "socks5://127.0.0.1:10001"
@@ -141,7 +141,7 @@ class LeaseBindingTests(IsolatedAsyncioTestCase):
         await service.fetch(_command(session="s"))
         _session_id, request = backend.fetch.await_args.args
         self.assertEqual(request.session_mode, ISOLATED_MODE)
-        self.assertEqual(request.mode, BROWSER_MODE)
+        self.assertEqual(request.mode, AUTO_MODE)
 
     async def test_a_named_selector_is_honored_without_rotation(self) -> None:
         backend = _backend(_result())

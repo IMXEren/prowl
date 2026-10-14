@@ -57,7 +57,7 @@ class ExplicitVerificationForwardingTests(_SnapshotFixture):
     async def test_absent_option_keeps_the_legacy_call_and_shape(self) -> None:
         backend, _group, site, events = self._backend(post_source=_verified())
 
-        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT))
+        result = await backend.fetch(None, FetchRequest(url=WARM_ROOT, mode=BROWSER_MODE))
 
         self.assertEqual(site.get.await_count, 1)
         self.assertEqual(site.get.await_args.args, (WARM_ROOT, 60))

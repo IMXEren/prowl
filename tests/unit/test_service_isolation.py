@@ -446,7 +446,9 @@ class BackendIsolatedContextTests(_BackendFixture):
 
     async def test_a_fetch_uses_the_session_context_and_keeps_it(self) -> None:
         backend, recorder = self._backend()
-        await backend.fetch(None, FetchRequest(url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE))
+        await backend.fetch(
+            None, FetchRequest(mode="browser", url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE)
+        )
         self.assertEqual(recorder.get_context_calls, ["s1"])
         self.assertEqual(len(recorder.groups), 1)
         self.assertIs(recorder.groups[0].context, recorder.contexts["s1"])
@@ -457,10 +459,10 @@ class BackendIsolatedContextTests(_BackendFixture):
     async def test_the_same_id_reuses_one_context(self) -> None:
         backend, recorder = self._backend()
         await backend.fetch(
-            None, FetchRequest(url="https://example.com/a", session_id="s1", session_mode=ISOLATED_MODE)
+            None, FetchRequest(mode="browser", url="https://example.com/a", session_id="s1", session_mode=ISOLATED_MODE)
         )
         await backend.fetch(
-            None, FetchRequest(url="https://example.com/b", session_id="s1", session_mode=ISOLATED_MODE)
+            None, FetchRequest(mode="browser", url="https://example.com/b", session_id="s1", session_mode=ISOLATED_MODE)
         )
         self.assertEqual(recorder.get_context_calls, ["s1"])
         self.assertEqual(len(recorder.groups), 2)
@@ -469,10 +471,10 @@ class BackendIsolatedContextTests(_BackendFixture):
     async def test_distinct_ids_get_distinct_contexts(self) -> None:
         backend, recorder = self._backend()
         await backend.fetch(
-            None, FetchRequest(url="https://example.com/a", session_id="s1", session_mode=ISOLATED_MODE)
+            None, FetchRequest(mode="browser", url="https://example.com/a", session_id="s1", session_mode=ISOLATED_MODE)
         )
         await backend.fetch(
-            None, FetchRequest(url="https://example.com/b", session_id="s2", session_mode=ISOLATED_MODE)
+            None, FetchRequest(mode="browser", url="https://example.com/b", session_id="s2", session_mode=ISOLATED_MODE)
         )
         self.assertEqual(recorder.get_context_calls, ["s1", "s2"])
         self.assertIsNot(recorder.contexts["s1"], recorder.contexts["s2"])
@@ -480,7 +482,7 @@ class BackendIsolatedContextTests(_BackendFixture):
 
     async def test_a_shared_fetch_keeps_the_shared_owner(self) -> None:
         backend, recorder = self._backend()
-        await backend.fetch(None, FetchRequest(url="https://example.com/"))
+        await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual(recorder.get_context_calls, [])
         self.assertEqual(len(recorder.groups), 1)
         self.assertIsNone(recorder.groups[0].context)
@@ -490,7 +492,9 @@ class BackendIsolatedContextTests(_BackendFixture):
         backend, recorder = self._backend(egress_idle_seconds=0.01)
         await backend.fetch(
             None,
-            FetchRequest(url="https://example.com/", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+            FetchRequest(
+                mode="browser", url="https://example.com/", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE
+            ),
         )
         self.assertEqual(recorder.shutdown_log, [])
         await backend.close_session("s1")
@@ -501,7 +505,7 @@ class BackendIsolatedContextTests(_BackendFixture):
 
     async def test_close_session_of_a_shared_id_is_a_no_op(self) -> None:
         backend, recorder = self._backend()
-        await backend.fetch(None, FetchRequest(url="https://example.com/"))
+        await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         await backend.close_session("shared-id")
         self.assertEqual(recorder.closed_contexts, [])
         await backend.aclose()
@@ -509,7 +513,9 @@ class BackendIsolatedContextTests(_BackendFixture):
     async def test_a_failed_context_close_retains_the_session_for_retry(self) -> None:
         backend, recorder = self._backend()
         recorder.close_context_failures = 1
-        await backend.fetch(None, FetchRequest(url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE))
+        await backend.fetch(
+            None, FetchRequest(mode="browser", url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE)
+        )
         with self.assertRaises(RuntimeError):
             await backend.close_session("s1")
         self.assertIn("s1", backend._isolated)
@@ -521,10 +527,16 @@ class BackendIsolatedContextTests(_BackendFixture):
         backend, recorder = self._backend()
         recorder.get_context_gate = asyncio.Event()
         first = asyncio.create_task(
-            backend.fetch(None, FetchRequest(url="https://example.com/a", session_id="s1", session_mode=ISOLATED_MODE)),
+            backend.fetch(
+                None,
+                FetchRequest(mode="browser", url="https://example.com/a", session_id="s1", session_mode=ISOLATED_MODE),
+            ),
         )
         second = asyncio.create_task(
-            backend.fetch(None, FetchRequest(url="https://example.com/b", session_id="s1", session_mode=ISOLATED_MODE)),
+            backend.fetch(
+                None,
+                FetchRequest(mode="browser", url="https://example.com/b", session_id="s1", session_mode=ISOLATED_MODE),
+            ),
         )
         await _settle(ticks=3)
         recorder.get_context_gate.set()
@@ -539,7 +551,13 @@ class BackendIsolatedContextTests(_BackendFixture):
         task = asyncio.create_task(
             backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(
+                    mode="browser",
+                    url="https://example.com/",
+                    egress="decodo",
+                    session_id="s1",
+                    session_mode=ISOLATED_MODE,
+                ),
             ),
         )
         await _settle(ticks=3)
@@ -621,7 +639,9 @@ class BackendIsolatedCookieTests(_BackendFixture):
     async def test_a_shared_read_is_unaffected_by_isolated_ownership(self) -> None:
         backend, recorder = self._backend()
         recorder.profile_cookies = [{"name": "a", "value": "b", "domain": ".example.com", "path": "/"}]
-        await backend.fetch(None, FetchRequest(url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE))
+        await backend.fetch(
+            None, FetchRequest(mode="browser", url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE)
+        )
         listed = await backend.list_cookies(CookieQuery())
         self.assertEqual([cookie["name"] for cookie in listed], ["a"])
         self.assertEqual(recorder.closed_contexts, [])
@@ -679,7 +699,7 @@ class BackendFetchCookieScopeTests(_BackendFixture):
         recorder.context_cookies["s1"] = [{"name": "isolated", "value": "2", "domain": ".example.com", "path": "/"}]
         result = await backend.fetch(
             None,
-            FetchRequest(url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE),
+            FetchRequest(mode="browser", url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE),
         )
         names = [cookie["name"] for cookie in result.cookies]
         self.assertEqual(names, ["isolated"])
@@ -689,7 +709,7 @@ class BackendFetchCookieScopeTests(_BackendFixture):
     async def test_a_shared_fetch_still_reads_the_profile_cookies(self) -> None:
         backend, recorder = self._backend()
         recorder.profile_cookies = [{"name": "shared", "value": "1", "domain": ".example.com", "path": "/"}]
-        result = await backend.fetch(None, FetchRequest(url="https://example.com/"))
+        result = await backend.fetch(None, FetchRequest(mode="browser", url="https://example.com/"))
         self.assertEqual([cookie["name"] for cookie in result.cookies], ["shared"])
         await backend.aclose()
 
@@ -699,7 +719,7 @@ class BackendFetchCookieScopeTests(_BackendFixture):
         with self.assertRaises(RuntimeError):
             await backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(mode="browser", url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE),
             )
         await backend.aclose()
 
@@ -760,13 +780,25 @@ class BackendIsolatedInitializationTests(_BackendFixture):
         first = asyncio.create_task(
             backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/a", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(
+                    mode="browser",
+                    url="https://example.com/a",
+                    egress="decodo",
+                    session_id="s1",
+                    session_mode=ISOLATED_MODE,
+                ),
             ),
         )
         second = asyncio.create_task(
             backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/b", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(
+                    mode="browser",
+                    url="https://example.com/b",
+                    egress="decodo",
+                    session_id="s1",
+                    session_mode=ISOLATED_MODE,
+                ),
             ),
         )
         await _settle(ticks=3)
@@ -784,7 +816,13 @@ class BackendIsolatedInitializationTests(_BackendFixture):
         recorder.get_context_gate = None
         result = await backend.fetch(
             None,
-            FetchRequest(url="https://example.com/c", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+            FetchRequest(
+                mode="browser",
+                url="https://example.com/c",
+                egress="decodo",
+                session_id="s1",
+                session_mode=ISOLATED_MODE,
+            ),
         )
         self.assertEqual(result.status_code, 200)
         self.assertEqual(recorder.get_context_calls, ["s1", "s1"])
@@ -799,13 +837,25 @@ class BackendIsolatedInitializationTests(_BackendFixture):
         first = asyncio.create_task(
             backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/a", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(
+                    mode="browser",
+                    url="https://example.com/a",
+                    egress="decodo",
+                    session_id="s1",
+                    session_mode=ISOLATED_MODE,
+                ),
             ),
         )
         second = asyncio.create_task(
             backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/b", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(
+                    mode="browser",
+                    url="https://example.com/b",
+                    egress="decodo",
+                    session_id="s1",
+                    session_mode=ISOLATED_MODE,
+                ),
             ),
         )
         await _wait_until(lambda: recorder.get_context_calls == ["s1"])
@@ -824,7 +874,13 @@ class BackendIsolatedInitializationTests(_BackendFixture):
         fetch_task = asyncio.create_task(
             backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(
+                    mode="browser",
+                    url="https://example.com/",
+                    egress="decodo",
+                    session_id="s1",
+                    session_mode=ISOLATED_MODE,
+                ),
             ),
         )
         await _wait_until(lambda: recorder.get_context_calls == ["s1"])
@@ -842,12 +898,14 @@ class BackendIsolatedInitializationTests(_BackendFixture):
         backend, _recorder = self._backend()
         await backend.fetch(
             None,
-            FetchRequest(url="https://example.com/", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE),
+            FetchRequest(
+                mode="browser", url="https://example.com/", egress="decodo", session_id="s1", session_mode=ISOLATED_MODE
+            ),
         )
         with self.assertRaises(SessionError):
             await backend.fetch(
                 None,
-                FetchRequest(url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE),
+                FetchRequest(mode="browser", url="https://example.com/", session_id="s1", session_mode=ISOLATED_MODE),
             )
         await backend.close_session("s1")
         await backend.aclose()
