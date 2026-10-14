@@ -1,3 +1,13 @@
+## [2.0.0-dev.2](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.1...v2.0.0-dev.2) (2026-10-14)
+
+### ⚠ BREAKING CHANGES
+
+* **captcha:** remove tabs_till_verify and turnstile_token. Use solveCaptcha (solve_captcha in Python) and captcha_provider/captcha_token instead.
+
+### New Features
+
+* **captcha:** unify widget solving behind solveCaptcha ([4b4c595](https://github.com/IMXEren/prowl/commit/4b4c595cce6bb6eb3eec2b315a9c33a25000184a))
+
 ## [2.0.0-dev.1](https://github.com/IMXEren/prowl/compare/v1.2.0-dev.1...v2.0.0-dev.1) (2026-10-09)
 
 ### ⚠ BREAKING CHANGES
