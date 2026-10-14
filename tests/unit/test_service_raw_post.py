@@ -15,6 +15,9 @@ import json
 from unittest import TestCase
 from unittest.mock import AsyncMock, Mock
 
+from tests.unit.test_service_http_transport import _Reply, _routes, _TransportTestCase
+from tests.unit.test_service_routing_backend import _http_result, _request, _RoutingFixture, _StubHttpClient
+
 from prowl.service.app import Service, ServiceConfig
 from prowl.service.backend import Backend, FetchRequest, FetchResult
 from prowl.service.errors import CallerSafeError
@@ -25,8 +28,6 @@ from prowl.service.protocol import (
     HTTP_MODE,
     FetchCommand,
 )
-from test_service_http_transport import _Reply, _routes, _TransportTestCase
-from test_service_routing_backend import _http_result, _request, _RoutingFixture, _StubHttpClient
 
 
 class RawBodyTransportTests(_TransportTestCase):

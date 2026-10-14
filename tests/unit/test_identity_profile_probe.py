@@ -11,7 +11,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import BrowserContext
-from scripts import verify_identity_profiles as probe
+from tests.integration import verify_identity_profiles as probe
 
 from prowl.browser.driver.contexts import BrowserContextHandle
 from prowl.browser.proxy.egress import EgressPool

@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from unittest import TestCase
 
-_SCRIPT = Path(__file__).resolve().parent.parent / ".github" / "scripts" / "ghcr_package.py"
+_SCRIPT = Path(__file__).resolve().parents[2] / ".github" / "scripts" / "ghcr_package.py"
 _SPEC = importlib.util.spec_from_file_location("ghcr_package", _SCRIPT)
 assert _SPEC is not None
 assert _SPEC.loader is not None

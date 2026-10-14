@@ -21,7 +21,7 @@ from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, Mock
 
 import h11
-from scripts import verify_forward_proxy as probe
+from tests.integration import verify_forward_proxy as probe
 
 from prowl.browser import Browser
 from prowl.browser.proxy.certificates import ProxyCertificates

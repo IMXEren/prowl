@@ -22,7 +22,7 @@ except ImportError:
     x509 = None
     _HAVE_CRYPTOGRAPHY = False
 
-from scripts import verify_isolated_sessions as probe
+from tests.integration import verify_isolated_sessions as probe
 
 
 class _RecordingProbe(probe._Probe):

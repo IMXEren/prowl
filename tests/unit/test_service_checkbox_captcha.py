@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+from tests.unit.test_service_browser_snapshot import WARM_ROOT, _SnapshotFixture
+
 from prowl.browser.page_handler import PageResponse
 from prowl.service.backend import FetchRequest
 from prowl.service.errors import CallerSafeError
 from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
-from test_service_browser_snapshot import WARM_ROOT, _SnapshotFixture
 
 CAPTCHA_ERROR = "captcha solving requires browser or auto GET"
 PROVIDER = "recaptcha"

@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from unittest import IsolatedAsyncioTestCase
 
-from tests.test_service_proxy_certificates import _generate_authority
+from tests.unit.test_service_proxy_certificates import _generate_authority
 
 from prowl.browser.proxy.bridge import BrowserProxyBridge, BrowserProxyBridgeError
 from prowl.browser.proxy.certificates import ProxyCertificates

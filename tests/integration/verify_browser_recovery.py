@@ -1,4 +1,4 @@
-"""Offline hard-crash gate: python -m scripts.verify_browser_recovery.
+"""Offline hard-crash gate: python -m tests.integration.verify_browser_recovery.
 
 Only the browser launched with this script's temporary profile is terminated.
 Shared cookies must already be durable before the crash; unflushed writes are not guaranteed.
@@ -19,11 +19,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 from zipfile import ZipFile
 
-from prowl.browser import Browser, BrowserConfig
-from prowl.browser.exceptions import BrowserContextError
-from prowl.service.backend import BrowserBackend, FetchRequest, InteractiveRequest
-from prowl.service.http_transport import HttpTransportError
-from scripts.verify_isolated_sessions import (
+from tests.integration.verify_isolated_sessions import (
     _emit,
     _offline_launch_patches,
     _Probe,
@@ -31,7 +27,7 @@ from scripts.verify_isolated_sessions import (
     _Result,
     _write_ephemeral_tls,
 )
-from scripts.verify_request_routing import (
+from tests.integration.verify_request_routing import (
     _INDEX_PATH,
     _cookie_reported,
     _counted_seams,
@@ -41,6 +37,11 @@ from scripts.verify_request_routing import (
     _serve,
     _server_tls,
 )
+
+from prowl.browser import Browser, BrowserConfig
+from prowl.browser.exceptions import BrowserContextError
+from prowl.service.backend import BrowserBackend, FetchRequest, InteractiveRequest
+from prowl.service.http_transport import HttpTransportError
 
 
 async def _browser_pid() -> int:
@@ -81,7 +82,7 @@ async def _wait_cookie_durable(profile: Path, name: str) -> None:
 
 async def _prepare_durable_profile(backend: BrowserBackend, url: str, root: Path) -> None:
     await backend.start()
-    if Browser._webdata_path().parent.parent.resolve() != (root / "profile").resolve():  # noqa: SLF001
+    if Browser._webdata_path().parent.parent.resolve() != (root / "profile").resolve():
         message = "Refusing crash probe outside its temporary profile"
         raise RuntimeError(message)
     shared = await Browser.get_context()

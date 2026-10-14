@@ -1,9 +1,9 @@
-r"""Owner-run probe for isolated sessions against a real local browser.
+r"""Integration probe for isolated sessions against a real local browser.
 
 This is not part of the pytest suite. Run it explicitly on a machine that already has the
 CloakBrowser binary and a display (or an X server):
 
-    .\.venv\Scripts\python.exe -m scripts.verify_isolated_sessions
+    .\.venv\Scripts\python.exe -m tests.integration.verify_isolated_sessions
 
 It uses a fresh ``TemporaryDirectory`` profile and two loopback HTTPS servers on 127.0.0.1 and
 127.0.0.2 only. It downloads and installs nothing. Its controlled requests are local, and it
@@ -457,10 +457,10 @@ async def _pd_context_id(target_id: str) -> str | None:
     tab = await Browser.get_pd_tab(target_id)
     if tab is None:
         return None
-    return tab._browser_context_id  # noqa: SLF001 - the attribute is the point of this check
+    return tab._browser_context_id
 
 
-async def _wait_until(predicate: Callable[[], bool], *, timeout: float, interval: float) -> bool:  # noqa: ASYNC109
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float, interval: float) -> bool:
     """Yield to the event loop until *predicate* holds or *timeout* elapses, with a deadline."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout

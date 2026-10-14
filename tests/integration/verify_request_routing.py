@@ -3,7 +3,7 @@ r"""Explicit real-browser probe for the HTTP/browser request routing against a r
 This is not part of the pytest suite. Run it explicitly on a machine that already has the
 CloakBrowser binary and a display (or an X server):
 
-    .\.venv\Scripts\python.exe -m scripts.verify_request_routing
+    .\.venv\Scripts\python.exe -m tests.integration.verify_request_routing
 
 It reuses the isolated-session probe's prerequisites, offline launch wrapper, ephemeral
 certificate helpers and cleanup, then drives the real :class:`~prowl.service.backend.BrowserBackend`
@@ -39,15 +39,8 @@ from typing import TYPE_CHECKING, Any
 from unittest import mock
 from urllib.parse import parse_qs
 
-from prowl.browser import Browser, BrowserConfig
-from prowl.service import http_transport
-from prowl.service.backend import BrowserBackend, FetchRequest
-from prowl.service.classification import SUCCESS
-from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
-from prowl.service.sessions import ISOLATED_MODE, SHARED_MODE
-
 # The probe reuses the isolated-session probe's seams rather than duplicating them.
-from scripts.verify_isolated_sessions import (
+from tests.integration.verify_isolated_sessions import (
     ProbePrerequisiteError,
     _best_effort,
     _cleanup_servers,
@@ -59,6 +52,13 @@ from scripts.verify_isolated_sessions import (
     _run_checks_sequence,
     _write_ephemeral_tls,
 )
+
+from prowl.browser import Browser, BrowserConfig
+from prowl.service import http_transport
+from prowl.service.backend import BrowserBackend, FetchRequest
+from prowl.service.classification import SUCCESS
+from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
+from prowl.service.sessions import ISOLATED_MODE, SHARED_MODE
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
@@ -438,12 +438,12 @@ async def _check_isolation(probe: _Probe, counters: _Counters, backend: BrowserB
         not _cookie_reported(seen.response)
         and not _cookie_reported(shared_one.response)
         and iso_one_client is not iso_two_client
-        and iso_one_client._context is not iso_two_client._context  # noqa: SLF001
+        and iso_one_client._context is not iso_two_client._context
         and iso_one_context is not iso_two_context
         and shared_one_client is shared_two_client
-        and shared_one_client._context is main_handle.context  # noqa: SLF001
-        and iso_one_client._context is iso_one_context  # noqa: SLF001
-        and iso_two_client._context is iso_two_context  # noqa: SLF001
+        and shared_one_client._context is main_handle.context
+        and iso_one_client._context is iso_one_context
+        and iso_two_client._context is iso_two_context
     )
     probe.record(
         _Result(
@@ -454,7 +454,7 @@ async def _check_isolation(probe: _Probe, counters: _Counters, backend: BrowserB
                 f"distinct_clients={iso_one_client is not iso_two_client} "
                 f"distinct_contexts={iso_one_context is not iso_two_context} "
                 f"shared_reused_client={shared_one_client is shared_two_client} "
-                f"shared_client_on_main={shared_one_client._context is main_handle.context}"  # noqa: SLF001
+                f"shared_client_on_main={shared_one_client._context is main_handle.context}"
             ),
         ),
     )
@@ -560,9 +560,9 @@ async def _check_isolated_close(
     iso_one_client = _client_for(counters, iso_one.context)
     await backend.close_session(_ISOLATED_ONE)
     context_closed = iso_one.context.is_closed()
-    client_closed = iso_one_client is not None and iso_one_client._closed  # noqa: SLF001
+    client_closed = iso_one_client is not None and iso_one_client._closed
     other_open = not iso_two.context.is_closed()
-    released = iso_one.context not in backend._http._states  # noqa: SLF001 - the ownership map is the point
+    released = iso_one.context not in backend._http._states
     probe.record(
         _Result(
             "closing an isolated session closes its context and HTTP client only",
@@ -619,9 +619,9 @@ async def _finalize_backend(probe: _Probe, counters: _Counters, backend: Browser
     if not await _best_effort("backend shutdown", backend.aclose):
         probe.record(_Result("backend shutdown", ok=False, detail="see cleanup errors above"))
         return
-    states = backend._http._states  # noqa: SLF001 - the ownership map is the point
-    clients_closed = all(client._closed for client in counters.http_fetches)  # noqa: SLF001
-    page_map = Browser._runtime.target_to_page_map  # noqa: SLF001 - the runtime page map is the point
+    states = backend._http._states
+    clients_closed = all(client._closed for client in counters.http_fetches)
+    page_map = Browser._runtime.target_to_page_map
     groups_gone = all(group.target_id not in page_map for group in counters.creates)
     running = Browser.is_running()
     probe.record(

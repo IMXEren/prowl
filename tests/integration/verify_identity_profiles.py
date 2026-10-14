@@ -14,13 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest import mock
 
-from prowl.browser import Browser, BrowserConfig
-from prowl.browser.driver.runtime import BrowserRuntimeState
-from prowl.browser.lifecycle.startup import BrowserLifecycle
-from prowl.browser.proxy.egress import EgressPool
-from prowl.service.backend import BrowserBackend
 from scripts.migrate_identity_profiles import MigrationResult, apply_migration
-from scripts.verify_isolated_sessions import (
+from tests.integration.verify_isolated_sessions import (
     ProbePrerequisiteError,
     _emit,
     _offline_launch_patches,
@@ -28,6 +23,12 @@ from scripts.verify_isolated_sessions import (
     _resolve_binary_path,
     _Result,
 )
+
+from prowl.browser import Browser, BrowserConfig
+from prowl.browser.driver.runtime import BrowserRuntimeState
+from prowl.browser.lifecycle.startup import BrowserLifecycle
+from prowl.browser.proxy.egress import EgressPool
+from prowl.service.backend import BrowserBackend
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -136,7 +137,7 @@ async def _read_identity(handle: BrowserContextHandle) -> str | None:
 
 def _require_owned(probe: _Probe, owner: type[Browser], expected_root: Path) -> None:
     """Fence the configured profile before lazy native acquisition."""
-    actual = owner._webdata_path().parent.parent.resolve()  # noqa: SLF001 - temporary-profile fence
+    actual = owner._webdata_path().parent.parent.resolve()
     expected = Path(expected_root).resolve()
     ok = actual == expected
     probe.record(_Result("owned browser profile fence", ok, f"expected={expected} actual={actual}"))

@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import AsyncMock, Mock, patch
 
-from scripts import verify_context_persistence as probe
+from tests.integration import verify_context_persistence as probe
 
 from prowl.browser import Browser
 from prowl.service.backend import BrowserBackend

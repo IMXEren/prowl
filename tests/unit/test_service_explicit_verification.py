@@ -11,11 +11,12 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock
 
+from tests.unit.test_service_browser_snapshot import WARM_ROOT, _SnapshotFixture
+
 from prowl.browser.page_handler import PageResponse
 from prowl.service.backend import FetchRequest
 from prowl.service.errors import CallerSafeError
 from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
-from test_service_browser_snapshot import WARM_ROOT, _SnapshotFixture
 
 VERIFY_ERROR = "explicit verification requires browser or auto GET"
 TOKEN = "turnstile-token"  # noqa: S105 - a test fixture value, not a credential

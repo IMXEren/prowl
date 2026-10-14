@@ -1,6 +1,6 @@
 """Offline proxy verification with a temporary browser profile, origin and signing CA.
 
-Run with ``python -m scripts.verify_forward_proxy``. Checks cover native routing and
+Run with ``python -m tests.integration.verify_forward_proxy``. Checks cover native routing and
 cookie continuity, verified CONNECT, authority binding, exact POST effects, isolation
 and shutdown. No trust is installed and no external origin or raw tunnel is used.
 """
@@ -26,6 +26,21 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+from tests.integration.verify_isolated_sessions import (
+    _cleanup_servers,
+    _offline_launch_patches,
+    _resolve_binary_path,
+    _write_ephemeral_tls,
+)
+from tests.integration.verify_request_routing import (
+    _JS_RENDER_TEXT,
+    _handler_class,
+    _pinned_tls_patches,
+    _ProbePage,
+    _serve,
+    _server_tls,
+    _SiteState,
+)
 
 from prowl.browser import Browser, BrowserConfig
 from prowl.browser.proxy.certificates import ProxyCertificates
@@ -37,21 +52,6 @@ from prowl.service import app as app_module
 from prowl.service.app import _SERVICE_KEY
 from prowl.service.backend import BrowserBackend
 from prowl.service.sessions import ISOLATED_MODE
-from scripts.verify_isolated_sessions import (
-    _cleanup_servers,
-    _offline_launch_patches,
-    _resolve_binary_path,
-    _write_ephemeral_tls,
-)
-from scripts.verify_request_routing import (
-    _JS_RENDER_TEXT,
-    _handler_class,
-    _pinned_tls_patches,
-    _ProbePage,
-    _serve,
-    _server_tls,
-    _SiteState,
-)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -453,9 +453,9 @@ async def _run_probe(
         )
         secondary: ProxyServer | None = None
         try:
-            await app_module._on_startup(app)  # noqa: SLF001 - the probe drives the app's real lifecycle
-            _assert_profile_owned(Browser._webdata_path().parent.parent, directory / "profile")  # noqa: SLF001 - the fence reads the native path
-            proxy = app[app_module._PROXY_KEY]  # noqa: SLF001 - the listener handle is the point
+            await app_module._on_startup(app)
+            _assert_profile_owned(Browser._webdata_path().parent.parent, directory / "profile")
+            proxy = app[app_module._PROXY_KEY]
             port = proxy.port
 
             index_response = await _request(port, origin_url + "/")
@@ -563,7 +563,7 @@ async def _run_probe(
                 if secondary is not None:
                     await secondary.aclose()
             finally:
-                await app_module._on_cleanup(app)  # noqa: SLF001 - the probe drives the app's real lifecycle
+                await app_module._on_cleanup(app)
 
         gauges = Browser.resource_metrics()
         results.append(
@@ -587,7 +587,7 @@ async def _main() -> int:
         def factory(state: _SiteState) -> type[BaseHTTPRequestHandler]:
             return _media_handler(_binary_handler(original_factory(state), observed), media_observed)
 
-        with mock.patch("scripts.verify_request_routing._handler_class", factory):
+        with mock.patch("tests.integration.verify_request_routing._handler_class", factory):
             server, state, origin_url = _serve("127.0.0.1", _server_tls(origin_cert, origin_key))
         state.pages["/"] = _ProbePage.INDEX
         state.pages["/js"] = _ProbePage.JS_REQUIRED

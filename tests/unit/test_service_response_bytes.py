@@ -13,12 +13,13 @@ import gzip
 import json
 from unittest import TestCase
 
+from tests.unit.test_service_http_transport import _Reply, _routes, _TransportTestCase
+from tests.unit.test_service_routing_backend import _request, _RoutingFixture, _StubHttpClient
+
 from prowl.service.backend import FetchResult
 from prowl.service.classification import SUCCESS
 from prowl.service.http_transport import HttpResult
 from prowl.service.protocol import BROWSER_MODE, HTTP_MODE, solution_payload
-from test_service_http_transport import _Reply, _routes, _TransportTestCase
-from test_service_routing_backend import _request, _RoutingFixture, _StubHttpClient
 
 
 class ResponseByteSeamTests(_TransportTestCase):

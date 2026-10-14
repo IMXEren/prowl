@@ -18,7 +18,7 @@ from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase, mock
 
 from playwright.async_api import BrowserContext as PWBrowserContext
-from scripts import verify_request_routing as probe
+from tests.integration import verify_request_routing as probe
 
 from prowl.browser.driver.contexts import BrowserContextHandle
 from prowl.service import http_transport

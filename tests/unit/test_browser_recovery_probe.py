@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from zipfile import ZipFile
 
 from playwright.async_api import BrowserContext
-from scripts import verify_browser_recovery as probe
+from tests.integration import verify_browser_recovery as probe
 
 from prowl.browser import Browser, BrowserContextHandle
 from prowl.service.backend import BrowserBackend

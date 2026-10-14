@@ -11,8 +11,8 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock
 
 import h11
-from tests.test_service_proxy_certificates import _generate_authority
-from tests.test_service_proxy_server import _http_result, _parse, _read_all, _values
+from tests.unit.test_service_proxy_certificates import _generate_authority
+from tests.unit.test_service_proxy_server import _http_result, _parse, _read_all, _values
 
 from prowl.browser.proxy.certificates import ProxyCertificates
 from prowl.browser.proxy.server import ProxyServer

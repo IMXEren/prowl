@@ -3,7 +3,7 @@ r"""Standalone offline gate for isolated-session context-state persistence.
 Run explicitly with the project virtualenv on a machine that already has the
 CloakBrowser binary and a display:
 
-    .\.venv\Scripts\python.exe -m scripts.verify_context_persistence
+    .\.venv\Scripts\python.exe -m tests.integration.verify_context_persistence
 
 It uses a fresh ``TemporaryDirectory`` profile, one loopback HTTPS server on 127.0.0.1 only, and
 downloads and installs nothing. The controlled requests are local; it never adds a synthetic
@@ -38,12 +38,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from prowl.browser import Browser, BrowserConfig
-from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
-from prowl.service.app import Service, ServiceConfig
-from prowl.service.backend import BrowserBackend
-from prowl.service.context_state import ContextStateStore
-from scripts.verify_isolated_sessions import (
+from tests.integration.verify_isolated_sessions import (
     _EMPTY_STATE,
     ProbePrerequisiteError,
     _cleanup_servers,
@@ -58,6 +53,12 @@ from scripts.verify_isolated_sessions import (
     _tls_context,
     _with_group,
 )
+
+from prowl.browser import Browser, BrowserConfig
+from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
+from prowl.service.app import Service, ServiceConfig
+from prowl.service.backend import BrowserBackend
+from prowl.service.context_state import ContextStateStore
 
 _SITE_HOST = "127.0.0.1"
 _STATE_PATH = "/state"
@@ -128,7 +129,7 @@ async def _start_owned(probe: _Probe, backend: BrowserBackend, directory: Path) 
     """
     await backend.start()
     expected = (directory / "profile").resolve()
-    actual = Browser._webdata_path().parent.parent.resolve()  # noqa: SLF001 - temporary-profile fence
+    actual = Browser._webdata_path().parent.parent.resolve()
     ok = actual == expected
     probe.record(_Result("owned browser profile fence", ok, f"expected={expected} actual={actual}"))
     if not ok:
@@ -201,8 +202,8 @@ class _Checks:
         await _start_owned(self.probe, backend, self.rig.directory)
         self.owned = True
         self.shared = await Browser.get_context(None)
-        self.one = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)  # noqa: SLF001
-        self.two = await backend._isolated_session(_ISOLATED_TWO, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        self.one = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)
+        self.two = await backend._isolated_session(_ISOLATED_TWO, DEFAULT_EGRESS_NAME)
         await service.sessions.ensure(_ISOLATED_ONE, mode="isolated", egress=DEFAULT_EGRESS_NAME)
         await service.sessions.ensure(_ISOLATED_TWO, mode="isolated", egress=DEFAULT_EGRESS_NAME)
         await self._seed()
@@ -238,7 +239,7 @@ class _Checks:
         """Expire ``one`` through the real registry and verify its native close and saved state."""
         before = Browser.resource_metrics()["context_evicted_total"]
         handle = self.one.context
-        service.sessions._entries[_ISOLATED_ONE].expires_at = 0.0  # noqa: SLF001
+        service.sessions._entries[_ISOLATED_ONE].expires_at = 0.0
         expired = await service.sessions.purge_expired()
         after = Browser.resource_metrics()["context_evicted_total"]
         native_closed = handle.context.is_closed()
@@ -255,7 +256,7 @@ class _Checks:
     async def _recreate_one(self, backend: BrowserBackend, service: Service) -> None:
         """Recreate the evicted id and verify it and its siblings keep their own markers."""
         await service.sessions.ensure(_ISOLATED_ONE, mode="isolated", egress=DEFAULT_EGRESS_NAME)
-        one = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        one = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)
         url = self._state_url()
         reads = {
             "one": await _with_group(one.context, url, _read_state),
@@ -279,7 +280,7 @@ class _Checks:
         """A never-seeded id must start empty, and destroying it leaves the seeded files intact."""
         before = _root_json_bytes(self.rig.state_root)
         await service.sessions.ensure(_ISOLATED_FRESH, mode="isolated", egress=DEFAULT_EGRESS_NAME)
-        fresh = await backend._isolated_session(_ISOLATED_FRESH, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        fresh = await backend._isolated_session(_ISOLATED_FRESH, DEFAULT_EGRESS_NAME)
         read = await _with_group(fresh.context, self._state_url(), _read_state)
         self.probe.record(
             _Result(
@@ -308,8 +309,8 @@ class _Checks:
         self.live.append(backend)
         await _start_owned(self.probe, backend, self.rig.directory)
         shared = await Browser.get_context(None)
-        one = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)  # noqa: SLF001
-        self.two = await backend._isolated_session(_ISOLATED_TWO, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        one = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)
+        self.two = await backend._isolated_session(_ISOLATED_TWO, DEFAULT_EGRESS_NAME)
         await service2.sessions.ensure(_ISOLATED_ONE, mode="isolated", egress=DEFAULT_EGRESS_NAME)
         await service2.sessions.ensure(_ISOLATED_TWO, mode="isolated", egress=DEFAULT_EGRESS_NAME)
         url = self._state_url()
@@ -337,7 +338,7 @@ class _Checks:
 
     async def _destroy_one(self, backend: BrowserBackend, service: Service) -> None:
         """An explicit destroy must close the context, forget its file, and leave the sibling's file."""
-        created = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        created = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)
         handle = created.context
         if handle is None:
             msg = "isolated context initialization returned no handle"
@@ -352,7 +353,7 @@ class _Checks:
             ),
         )
         await service.sessions.ensure(_ISOLATED_ONE, mode="isolated", egress=DEFAULT_EGRESS_NAME)
-        again = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        again = await backend._isolated_session(_ISOLATED_ONE, DEFAULT_EGRESS_NAME)
         url = self._state_url()
         reads = {
             "one": await _with_group(again.context, url, _read_state),
@@ -374,7 +375,7 @@ class _Checks:
         backend, _ = _new_backend(self.rig, enabled=False)
         self.live.append(backend)
         await _start_owned(self.probe, backend, self.rig.directory)
-        two = await backend._isolated_session(_ISOLATED_TWO, DEFAULT_EGRESS_NAME)  # noqa: SLF001
+        two = await backend._isolated_session(_ISOLATED_TWO, DEFAULT_EGRESS_NAME)
         read = await _with_group(two.context, self._state_url(), _read_state)
         self.probe.record(
             _Result(
@@ -396,7 +397,7 @@ class _Checks:
     def _final(self) -> None:
         """The final shutdown must retire every native context, tab group and runtime handle."""
         metrics = Browser.resource_metrics()
-        handles_gone = Browser._runtime.main_ctx is None and Browser._runtime.shared_pd is None  # noqa: SLF001
+        handles_gone = Browser._runtime.main_ctx is None and Browser._runtime.shared_pd is None
         ok = not metrics["context_count"] and not metrics["tabgroups_active"] and handles_gone
         self.probe.record(
             _Result(

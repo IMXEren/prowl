@@ -7,10 +7,11 @@ import contextlib
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
+from tests.unit.test_service_browser_snapshot import WARM_ROOT, _SnapshotFixture, _source
+
 from prowl.service.backend import FetchRequest
 from prowl.service.errors import CallerSafeError
 from prowl.service.protocol import AUTO_MODE, BROWSER_MODE, HTTP_MODE
-from test_service_browser_snapshot import WARM_ROOT, _SnapshotFixture, _source
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator

@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, Mock
 
 import h11
 from loguru import logger
-from tests.test_service_proxy_server import _close_writer, _http_result, _parse, _read_all, _values
+from tests.unit.test_service_proxy_server import _close_writer, _http_result, _parse, _read_all, _values
 
 from prowl.browser.proxy.dispatch import dispatch_request
 from prowl.browser.proxy.http1 import ProxyRequest

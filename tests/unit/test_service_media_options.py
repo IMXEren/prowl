@@ -2,9 +2,10 @@
 
 from unittest import IsolatedAsyncioTestCase, TestCase
 
+from tests.unit.test_service_snapshot_options import _backend, _config, _result
+
 from prowl.service.app import Service
 from prowl.service.protocol import FetchCommand, ProtocolError, parse_request
-from test_service_snapshot_options import _backend, _config, _result
 
 _GET = {"cmd": "request.get", "url": "https://example.com/"}
 

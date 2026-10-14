@@ -17,7 +17,7 @@ from prowl.browser.exceptions import BrowserStartError
 from prowl.browser.lifecycle import BrowserLifecycle
 from prowl.browser.options import BrowserOptions
 
-_ROOT = Path(__file__).resolve().parent.parent
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 class BrowserLifecycleConfigTests(TestCase):

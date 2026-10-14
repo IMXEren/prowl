@@ -9,7 +9,7 @@ from unittest import TestCase
 
 from prowl.browser.driver.runtime import BrowserRuntimeState
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 class BrowserRuntimeStateTests(TestCase):
