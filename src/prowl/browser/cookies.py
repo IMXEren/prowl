@@ -9,7 +9,7 @@ from typing import Any, ClassVar, Self, TypedDict
 
 from pydoll.protocol.network.types import CookieParam as PyDollCookieParam
 
-from prowl.browser.rwlock import RWLock
+from prowl.structures import RWLock
 
 
 class Cookie(TypedDict):
