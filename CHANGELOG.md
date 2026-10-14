@@ -1,3 +1,14 @@
+## [2.0.0-dev.3](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.2...v2.0.0-dev.3) (2026-10-14)
+
+### Bug Fixes
+
+* **typing:** use generator annotations for context managers ([f305bc8](https://github.com/IMXEren/prowl/commit/f305bc864312c6d97c35210a05a8cf9c900d9ee8))
+
+### Refactoring
+
+* replace direct requests helper dependencies ([fafdf0d](https://github.com/IMXEren/prowl/commit/fafdf0d464fdf08a0792a49ae63e19d6dad4a8b5))
+* **structures:** relocate and clean up RWLock ([d2e6abf](https://github.com/IMXEren/prowl/commit/d2e6abfdf4bac4bdab4dcfa9ae39fa79734d6fcd))
+
 ## [2.0.0-dev.2](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.1...v2.0.0-dev.2) (2026-10-14)
 
 ### ⚠ BREAKING CHANGES
