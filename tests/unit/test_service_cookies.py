@@ -10,6 +10,9 @@ The service is exercised with an in-memory backend and the backend with stub bro
 process is launched.
 """
 
+# Pyright does not narrow command unions through unittest assertions.
+# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+
 from __future__ import annotations
 
 import asyncio
@@ -33,6 +36,7 @@ from prowl.service.backend import (
 from prowl.service.protocol import (
     CMD_COOKIES_LIST,
     SUPPORTED_COMMANDS,
+    BrowserOpenCommand,
     CookiesListCommand,
     ProtocolError,
     cookies_payload,
@@ -180,6 +184,7 @@ class CookieCommandParsingTests(TestCase):
         command = parse_request(
             {"cmd": "cookies.list", "url": "https://example.com/path", "proxy": {"name": "decodo"}},
         )
+        self.assertIsInstance(command, CookiesListCommand)
         self.assertEqual(command.url, "https://example.com/path")
         self.assertIsNotNone(command.proxy)
         self.assertEqual(command.proxy.name, "decodo")
@@ -197,16 +202,19 @@ class CookieCommandParsingTests(TestCase):
         command = parse_request(
             {"cmd": "browser.open", "url": "https://example.com/", "cookies": cookies},
         )
+        self.assertIsInstance(command, BrowserOpenCommand)
         self.assertEqual(command.cookies, cookies)
         self.assertFalse(command.new_tab)
 
     def test_open_defaults_to_reusing_a_tab(self) -> None:
         command = parse_request({"cmd": "browser.open", "url": "https://example.com/"})
+        self.assertIsInstance(command, BrowserOpenCommand)
         self.assertEqual(command.cookies, [])
         self.assertFalse(command.new_tab)
 
     def test_open_can_force_a_new_tab(self) -> None:
         command = parse_request({"cmd": "browser.open", "url": "https://example.com/", "newTab": True})
+        self.assertIsInstance(command, BrowserOpenCommand)
         self.assertTrue(command.new_tab)
 
     def test_open_rejects_a_non_boolean_new_tab(self) -> None:

@@ -6,6 +6,9 @@ earned by clicking through a challenge is the one the fetches then use. The pool
 with stub browsers and the service with an in-memory backend, so no process is launched.
 """
 
+# Pyright does not narrow command unions through unittest assertions.
+# pyright: reportAttributeAccessIssue=false, reportOptionalMemberAccess=false
+
 from __future__ import annotations
 
 import asyncio
@@ -17,7 +20,7 @@ from unittest.mock import patch
 from prowl.browser.config import BrowserConfig
 from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
 from prowl.service.app import Service, ServiceConfig
-from prowl.service.backend import DEFAULT_INTERACTIVE_IDLE_SECONDS
+from prowl.service.backend import DEFAULT_INTERACTIVE_IDLE_SECONDS, CookieQuery
 
 _EGRESS_URL = "socks5://127.0.0.1:10001"
 _OTHER_URL = "socks5://127.0.0.1:10002"
@@ -44,6 +47,7 @@ class FakeBackend:
         self.closed: list[str | None] = []
         self.listed_tabs: list[str | None] = []
         self.tabs: dict[str, Any] = {}
+        self.cookie_queries: list[CookieQuery] = []
         self.active = 0
         self.max_active = 0
         self._delay = delay
@@ -116,6 +120,11 @@ class FakeBackend:
         self.listed_tabs.append(tab_id)
         return [self.tabs[key] for key in sorted(self.tabs)]
 
+    async def list_cookies(self, query: CookieQuery) -> list[dict[str, Any]]:
+        """Record the query and report no cookies, matching the backend contract."""
+        self.cookie_queries.append(query)
+        return []
+
     async def aclose(self) -> None:
         """No-op for the double."""
 
@@ -172,7 +181,7 @@ class BrowserCommandParsingTests(TestCase):
             parse_request({"cmd": "browser.open", "url": "https://example.com/", "postData": "x"})
 
     def test_open_accepts_a_session_and_an_egress_name(self) -> None:
-        from prowl.service.protocol import parse_request  # noqa: PLC0415
+        from prowl.service.protocol import BrowserOpenCommand, parse_request  # noqa: PLC0415
 
         command = parse_request(
             {
@@ -182,6 +191,7 @@ class BrowserCommandParsingTests(TestCase):
                 "proxy": {"name": "decodo"},
             },
         )
+        self.assertIsInstance(command, BrowserOpenCommand)
         self.assertEqual(command.session, "reading")
         self.assertIsNotNone(command.proxy)
         self.assertEqual(command.proxy.name, "decodo")
@@ -194,9 +204,10 @@ class BrowserCommandParsingTests(TestCase):
         self.assertIsNone(command.tab)
 
     def test_close_accepts_a_tab_id(self) -> None:
-        from prowl.service.protocol import parse_request  # noqa: PLC0415
+        from prowl.service.protocol import BrowserCloseCommand, parse_request  # noqa: PLC0415
 
         command = parse_request({"cmd": "browser.close", "tab": "tab-3"})
+        self.assertIsInstance(command, BrowserCloseCommand)
         self.assertEqual(command.tab, "tab-3")
 
     def test_close_rejects_an_unsafe_tab_id(self) -> None:

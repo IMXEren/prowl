@@ -34,6 +34,8 @@ from prowl.service.sessions import ISOLATED_MODE, SessionInfo, SessionRegistry
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from playwright.async_api import StorageState
+
     from prowl.browser.driver.contexts import BrowserContextHandle
 
 
@@ -228,7 +230,11 @@ def _counting_browser(runtime: BrowserRuntimeState, create: Callable[[str], Awai
 
     class CountingBrowser(Browser):
         @classmethod
-        async def get_context(cls, session_id: str | None = None) -> BrowserContextHandle:
+        async def get_context(
+            cls, session_id: str | None = None, *, storage_state: StorageState | None = None
+        ) -> BrowserContextHandle:
+            if storage_state is not None:
+                raise NotImplementedError
             if session_id is None:
                 shared = cls._runtime.contexts.shared()
                 assert shared is not None

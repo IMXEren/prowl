@@ -13,7 +13,7 @@ from prowl.browser import Browser as PublicBrowser
 from prowl.browser import TabGroup as PublicTabGroup
 from prowl.browser.browser import Browser, BrowserShutdownState, TabGroup
 from prowl.browser.driver import BrowserRuntimeState, DriverRemoteAttachConfig, DriverStartupConfig
-from prowl.browser.exceptions import BrowserStartError
+from prowl.browser.exceptions import BrowserShutdownError, BrowserStartError
 from prowl.browser.lifecycle import BrowserLifecycle
 
 # ruff: noqa: S108
@@ -94,7 +94,7 @@ class ConcreteBoundaryShapeTests(TestCase):
                 profile_dir="/tmp/p",
                 user_data_dir="/tmp/p",
                 cdp_port=port,
-                fingerprint_options=object(),
+                fingerprint_options=MagicMock(),
                 launch_arguments=[],
                 viewport={"width": 1, "height": 1},
                 locale="en-US,en",
@@ -507,7 +507,7 @@ class LifecycleAdmissionTests(IsolatedAsyncioTestCase):
         """State transition: terminal shutdown state resets once before startup."""
         lifecycle = BrowserLifecycle(_driver_double())
         lifecycle._shutdown_state = BrowserShutdownState.SUCCEEDED
-        lifecycle._shutdown_error = RuntimeError("stored")
+        lifecycle._shutdown_error = BrowserShutdownError("stored")
         lifecycle._shutdown_task = MagicMock()
 
         await lifecycle.start(
@@ -621,7 +621,7 @@ def _config(*, cdp_port: int = 9222) -> DriverStartupConfig:
         profile_dir="/tmp/profile",
         user_data_dir="/tmp/profile",
         cdp_port=cdp_port,
-        fingerprint_options=object(),
+        fingerprint_options=MagicMock(),
         launch_arguments=["--remote-debugging-port=9222"],
         viewport={"width": 1920, "height": 980},
         locale="en-US,en",

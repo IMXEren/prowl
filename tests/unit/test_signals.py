@@ -5,7 +5,8 @@ CancellationToken, LIFO drain, per-registration timeout, and one-shot
 install/uninstall lifecycle.
 """
 
-# mypy: disable-error-code="attr-defined,arg-type,return-value,comparison-overlap"
+# The tests drive the worker lifecycle before accessing its optional thread handle.
+# pyright: reportOptionalMemberAccess=false
 
 from __future__ import annotations
 
@@ -42,7 +43,11 @@ def _register_hold(coord: process_signals.SignalCoordinator) -> threading.Event:
     state (phase, frozen identifiers, etc.).
     """
     hold = threading.Event()
-    coord.register(lambda: hold.wait(timeout=5))
+
+    def wait() -> None:
+        hold.wait(timeout=5)
+
+    coord.register(wait)
     return hold
 
 
@@ -51,7 +56,7 @@ def _make_running_loop() -> MagicMock:
     loop = MagicMock(spec=asyncio.AbstractEventLoop)
     loop.is_closed.return_value = False
     loop.is_running.return_value = True
-    return cast("asyncio.AbstractEventLoop", loop)
+    return loop
 
 
 # ---------------------------------------------------------------------------

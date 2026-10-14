@@ -178,7 +178,8 @@ class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
         page.wait_for_function = AsyncMock(side_effect=wait)
         group.ppage = page
         site = _site(group)
-        site.timeout = 0.05
+        site.timeout = 1
+        site.start -= 0.95
         with self.assertRaises(TimeoutError):
             await site.verify_turnstile()
         page.keyboard.press.assert_not_called()

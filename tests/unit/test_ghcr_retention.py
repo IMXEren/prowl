@@ -3,7 +3,17 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest import TestCase
+
+if TYPE_CHECKING:
+    from typing import Protocol
+
+    class _Version(Protocol):
+        version_id: int
+        created_at: str
+        tags: tuple[str, ...]
+
 
 _SCRIPT = Path(__file__).resolve().parents[2] / ".github" / "scripts" / "ghcr_package.py"
 _SPEC = importlib.util.spec_from_file_location("ghcr_package", _SCRIPT)
@@ -14,11 +24,11 @@ sys.modules["ghcr_package"] = ghcr_package
 _SPEC.loader.exec_module(ghcr_package)
 
 
-def _version(version_id: int, created: int, *tags: str) -> object:
+def _version(version_id: int, created: int, *tags: str) -> _Version:
     return ghcr_package.PackageVersion(version_id, f"2026-01-{created:02d}T00:00:00Z", tags)
 
 
-def _digest(version: object, digest: str) -> object:
+def _digest(version: _Version, digest: str) -> _Version:
     return ghcr_package.PackageVersion(
         version.version_id,
         version.created_at,

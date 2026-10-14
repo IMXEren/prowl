@@ -23,11 +23,12 @@ from prowl.browser.browser import Browser, BrowserShutdownState
 from prowl.browser.driver import BrowserRuntimeState
 from prowl.browser.exceptions import BrowserShutdownError, BrowserStartError
 from prowl.browser.lifecycle import BrowserLifecycle
-from prowl.shutdown import CoordinatorStateError, RegistrationToken
+from prowl.shutdown import CoordinatorStateError, RegistrationToken, SignalCoordinator
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
     from types import TracebackType
+
+    from prowl.shutdown import CleanupCallback
 
 
 _FAIL_ON_SECOND_CALL = 2
@@ -116,8 +117,9 @@ def _startup_base_patches() -> list:
     ]
 
 
-class _FakeCoordinator:
+class _FakeCoordinator(SignalCoordinator):
     def __init__(self) -> None:
+        super().__init__()
         self.registered: list[RegistrationToken] = []
         self.unregistered: list[RegistrationToken] = []
         self.raise_on_register: BaseException | None = None
@@ -129,7 +131,7 @@ class _FakeCoordinator:
 
     def register(
         self,
-        cleanup: Callable[[], None],
+        cleanup: CleanupCallback,
         *,
         owner_loop: asyncio.AbstractEventLoop | None = None,
         name: str | None = None,
@@ -1478,7 +1480,8 @@ class StartDuringShutdownTests(IsolatedAsyncioTestCase):
         lc._shutdown_state = BrowserShutdownState.IN_PROGRESS
         cleanup_task = asyncio.create_task(asyncio.sleep(999))
         lc._shutdown_task = cleanup_task
-        lc._shutdown_error = RuntimeError("previous error")
+        stored_error = BrowserShutdownError("previous error")
+        lc._shutdown_error = stored_error
 
         with (
             patch.object(Browser, "_cleanup_resources") as mock_cleanup,
@@ -1489,7 +1492,7 @@ class StartDuringShutdownTests(IsolatedAsyncioTestCase):
         # IN_PROGRESS state preserved
         self.assertIs(lc._shutdown_state, BrowserShutdownState.IN_PROGRESS)
         self.assertIs(lc._shutdown_task, cleanup_task)
-        self.assertIsInstance(lc._shutdown_error, RuntimeError)
+        self.assertIs(lc._shutdown_error, stored_error)
         # Cleanup never re-executed
         mock_cleanup.assert_not_called()
 

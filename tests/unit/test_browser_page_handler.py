@@ -4,15 +4,19 @@ The tab group is replaced by a fake so that header isolation, origin-root warmup
 ordering, and cancellation cleanup are verified without a live browser.
 """
 
+# Pyright does not narrow optional headers through unittest assertions.
+# pyright: reportOptionalSubscript=false
+
 from __future__ import annotations
 
 import asyncio
 from typing import Any
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 from turbohtml import Element
 
+from prowl.browser.browser import TabGroup
 from prowl.browser.page_handler import PageHandler, PageResponse
 
 
@@ -125,6 +129,13 @@ class FakeWarmSite:
         return PageResponse("<html></html>", status_code=200, url=url)
 
 
+def _handler(group: FakeTabGroup) -> PageHandler:
+    """Expose the recording fake through a spec-bound tab-group mock."""
+    tabs = Mock(spec=TabGroup, ppage=group.ppage)
+    type(tabs).ptab = PropertyMock(side_effect=lambda: group.ptab)
+    return PageHandler(tabs)
+
+
 async def _post_result(_url: str, _post_data: str, _headers: dict[str, str]) -> dict[str, Any]:
     return {"status": 200, "headers": {"content-type": "text/html"}, "body": "<html></html>", "userAgent": "UA"}
 
@@ -140,7 +151,7 @@ class SiteGetHeaderIsolationTests(IsolatedAsyncioTestCase):
         headers: dict[str, str] | None = None,
         header_scope: str | None = None,
     ) -> None:
-        site = PageHandler(group)
+        site = _handler(group)
         build = AsyncMock(side_effect=RuntimeError("boom")) if fail else AsyncMock(return_value=Element("html"))
         with (
             patch.object(PageHandler, "_add_network_listeners", AsyncMock()),
@@ -196,6 +207,7 @@ class SiteGetHeaderIsolationTests(IsolatedAsyncioTestCase):
             group,
             FakeRequest(group.ppage, "https://example.com/page", navigation=True),
         )
+        self.assertIsNotNone(document.continued_headers)
         self.assertEqual(document.continued_headers["authorization"], "Bearer token")
         self.assertEqual(document.continued_headers["user-agent"], "browser-owned")
         self.assertIsNone(subresource.continued_headers)
@@ -214,6 +226,8 @@ class SiteGetHeaderIsolationTests(IsolatedAsyncioTestCase):
         self.assertFalse(matcher("https://challenges.example.net/widget.js"))
         same_origin = await self._route(group, FakeRequest(group.ppage, "https://example.com/api"))
         explicit_default_port = await self._route(group, FakeRequest(group.ppage, "https://example.com:443/asset"))
+        self.assertIsNotNone(same_origin.continued_headers)
+        self.assertIsNotNone(explicit_default_port.continued_headers)
         self.assertEqual(same_origin.continued_headers["x-api-key"], "token")
         self.assertEqual(explicit_default_port.continued_headers["x-api-key"], "token")
 
@@ -242,7 +256,7 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
 
     async def test_warmup_delegates_through_get_solver_not_bare_navigation(self) -> None:
         group = FakeTabGroup()
-        site = PageHandler(group)
+        site = _handler(group)
         warm = FakeWarmSite(group.events)
 
         async def capture(url: str, _data: str, _headers: dict[str, str]) -> dict[str, Any]:
@@ -265,7 +279,7 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
 
     async def test_post_does_not_install_its_own_page_listeners(self) -> None:
         group = FakeTabGroup()
-        site = PageHandler(group)
+        site = _handler(group)
         warm = FakeWarmSite(group.events)
         with (
             patch("prowl.browser.page_handler.resolve_page_handler", return_value=warm),
@@ -277,7 +291,7 @@ class SitePostPreflightTests(IsolatedAsyncioTestCase):
 
     async def test_post_cleans_up_on_cancellation(self) -> None:
         group = FakeTabGroup()
-        site = PageHandler(group)
+        site = _handler(group)
         warm = FakeWarmSite(group.events)
         with (
             patch("prowl.browser.page_handler.resolve_page_handler", return_value=warm),

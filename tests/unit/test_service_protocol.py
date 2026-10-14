@@ -19,7 +19,14 @@ from aiohttp.test_utils import TestClient, TestServer
 from prowl.browser.exceptions import BrowserError
 from prowl.service import app as app_module
 from prowl.service.app import Service, ServiceConfig, create_app
-from prowl.service.backend import FetchRequest, FetchResult
+from prowl.service.backend import (
+    CookieQuery,
+    FetchRequest,
+    FetchResult,
+    InteractiveOpenResult,
+    InteractiveRequest,
+    InteractiveTab,
+)
 from prowl.service.errors import ProxyError, SessionLimitError, SessionNotFoundError
 from prowl.service.protocol import MAX_TTL_MINUTES, VERSION
 from prowl.service.sessions import SessionRegistry
@@ -111,6 +118,18 @@ class FakeBackend:
             return self.result()
         finally:
             self.active -= 1
+
+    async def open_interactive(self, request: InteractiveRequest) -> InteractiveOpenResult:
+        raise NotImplementedError
+
+    async def close_interactive(self, tab_id: str | None) -> list[str]:
+        raise NotImplementedError
+
+    async def list_interactive(self, tab_id: str | None = None) -> list[InteractiveTab]:
+        raise NotImplementedError
+
+    async def list_cookies(self, query: CookieQuery) -> list[dict[str, Any]]:
+        raise NotImplementedError
 
     async def aclose(self) -> None:
         self.closed = True

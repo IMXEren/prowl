@@ -17,6 +17,8 @@ from typing import Self, cast
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from playwright.async_api import BrowserContext as PWBrowserContext
+
 from prowl.browser.browser import Browser, TabGroup
 from prowl.browser.driver.runtime import BrowserRuntimeState
 from prowl.browser.lifecycle.startup import BrowserLifecycle
@@ -25,11 +27,11 @@ from prowl.browser.proxy.egress import create_egress_browser
 _TARGET_ID = "target-one"
 
 
-class _FakeLiveContext:
+def _live_context() -> MagicMock:
     """Minimal live Playwright context for runtime ownership checks."""
-
-    def is_closed(self) -> bool:
-        return False
+    context = MagicMock(spec=PWBrowserContext)
+    context.is_closed.return_value = False
+    return context
 
 
 def _egress(name: str, tmp: Path, port: int) -> type[Browser]:
@@ -42,7 +44,7 @@ def _egress(name: str, tmp: Path, port: int) -> type[Browser]:
         preferred_cdp_port=port,
     )
     # A group is only created in a running browser, which is what binds its context.
-    egress._runtime.main_ctx = _FakeLiveContext()
+    egress._runtime.main_ctx = _live_context()
     return egress
 
 
@@ -91,7 +93,7 @@ class EgressGroupOwnershipTests(IsolatedAsyncioTestCase):
     async def test_invariant_the_default_browser_group_stays_bound_to_the_default_browser(self: Self) -> None:
         """Invariant: the default path keeps building plain groups owned by Browser."""
         Browser._runtime = BrowserRuntimeState(max_groups=3)
-        Browser._runtime.main_ctx = _FakeLiveContext()
+        Browser._runtime.main_ctx = _live_context()
         with (
             patch.object(BrowserRuntimeState, "create_page", AsyncMock(return_value=("target-default", object()))),
             patch.object(BrowserRuntimeState, "allocate_group_id", MagicMock(return_value=2)),

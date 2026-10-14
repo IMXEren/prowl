@@ -6,7 +6,11 @@ import ast
 import asyncio
 from pathlib import Path
 from unittest import TestCase
+from unittest.mock import MagicMock
 
+from playwright.async_api import Page
+
+from prowl.browser.browser import TabGroup
 from prowl.browser.driver.runtime import BrowserRuntimeState
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -33,8 +37,8 @@ class BrowserRuntimeStateTests(TestCase):
         first = BrowserRuntimeState(max_groups=1)
         second = BrowserRuntimeState(max_groups=2)
 
-        first.target_to_page_map["target"] = object()
-        first.active_groups.add(object())
+        first.target_to_page_map["target"] = MagicMock(spec=Page)
+        first.active_groups.add(TabGroup("target", 1))
 
         self.assertEqual(second.target_to_page_map, {})
         self.assertEqual(second.active_groups, set())

@@ -1,5 +1,8 @@
 """Turnstile uses solveCaptcha and the shared provider/token response."""
 
+# Pyright does not narrow command unions through unittest assertions.
+# pyright: reportAttributeAccessIssue=false, reportArgumentType=false
+
 from __future__ import annotations
 
 from unittest import IsolatedAsyncioTestCase, TestCase

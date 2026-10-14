@@ -13,6 +13,7 @@ import dataclasses
 import time
 from typing import TYPE_CHECKING
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 
 from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
 from prowl.service.errors import SessionError, SessionLimitError, SessionNotFoundError
@@ -99,15 +100,14 @@ class SessionMetadataTests(IsolatedAsyncioTestCase):
 
     async def test_omitted_ttl_preserves_the_configured_ttl(self) -> None:
         registry = SessionRegistry(max_sessions=4)
-        await registry.create("s", 5)
-        before = registry._entries["s"].expires_at
-        await asyncio.sleep(0.01)
-        info = await registry.ensure("s")
+        with patch("prowl.service.sessions.time") as clock:
+            clock.monotonic.return_value = 100.0
+            await registry.create("s", 5)
+            self.assertEqual(registry._entries["s"].expires_at, 400.0)
+            clock.monotonic.return_value = 101.0
+            info = await registry.ensure("s")
         self.assertEqual(info.ttl_minutes, 5)
-        after = registry._entries["s"].expires_at
-        assert after is not None
-        assert before is not None
-        self.assertGreater(after, before)
+        self.assertEqual(registry._entries["s"].expires_at, 401.0)
 
     async def test_explicit_none_ttl_clears_the_configured_ttl(self) -> None:
         registry = SessionRegistry(max_sessions=4)
