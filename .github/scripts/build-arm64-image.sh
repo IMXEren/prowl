@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
-# Build the arm64 image natively and merge it into the released manifest.
-#
-# The amd64 image is published by semantic-release on an amd64 runner; this runs
-# on a native arm64 runner so no emulation is involved, then folds both platform
-# manifests into one index under the tags that release already created.
+# Build and smoke-test the native arm64 candidate without publishing release tags.
 set -euo pipefail
 
 descriptor="release-image.json"
 if [[ ! -f "$descriptor" ]]; then
-    echo "No released image descriptor; this run published nothing to merge."
-    exit 0
+    echo "Missing released image descriptor: $descriptor" >&2
+    exit 1
 fi
 
 read -r image version moving_tag amd64_digest < <(python - "$descriptor" <<'PY'
@@ -61,11 +57,23 @@ if [[ -z "$arm64_digest" ]]; then
     exit 1
 fi
 
-# imagetools resolves sources through a registry, so each digest needs its repository.
-docker buildx imagetools create \
-    --tag "${image}:${version}" \
-    --tag "${image}:${moving_tag}" \
-    "${image}@${amd64_digest}" \
-    "${image}@${arm64_digest}"
+candidate="${image}@${arm64_digest}"
+docker run --rm --entrypoint python "$candidate" -c "import prowl"
+if [[ -n "${PROWL_FONT_GITHUB_TOKEN:-}" ]]; then
+    docker run --rm --entrypoint sh "$candidate" -c \
+        'test -n "$(find /usr/share/fonts/windows -type f -print -quit)"'
+fi
 
-echo "Merged linux/amd64 ${amd64_digest} and linux/arm64 ${arm64_digest} into ${image}:${version} and ${image}:${moving_tag}"
+python - "$descriptor" "$arm64_digest" <<'PY'
+import json
+import sys
+
+path, digest = sys.argv[1:3]
+with open(path, encoding="utf-8") as handle:
+    descriptor = json.load(handle)
+descriptor["arm64_digest"] = digest
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(descriptor, handle, indent=2)
+    handle.write("\n")
+print(f"Recorded arm64 candidate {descriptor['image']}@{digest}; release tags unchanged")
+PY
