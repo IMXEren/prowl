@@ -1,3 +1,16 @@
+## [2.0.0-dev.5](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.4...v2.0.0-dev.5) (2026-10-14)
+
+### Dependencies
+
+* **deps:** bump cloakbrowser to 0.6.3 ([fe3fe47](https://github.com/IMXEren/prowl/commit/fe3fe47ae77d4a3b0830f7a0fa1f2df7ad2b1d20))
+* **deps:** bump cryptography to 50.0.2 ([9ed8180](https://github.com/IMXEren/prowl/commit/9ed8180ddb13758487f05441733ca38f26737051))
+* **deps:** bump curl_cffi to 0.16.3 ([f5815b2](https://github.com/IMXEren/prowl/commit/f5815b260cfeba2d8fce6167cc0b825008bc2618))
+* **deps:** bump pycryptodome to 4.0.0 ([a053b66](https://github.com/IMXEren/prowl/commit/a053b663aa055149515863a5b875421f9b50d11f))
+* **deps:** bump ruff to 0.17.0 ([920c5c4](https://github.com/IMXEren/prowl/commit/920c5c4386fe9006461c9a8c3d2c2e8e8f1c8b27))
+* **deps:** bump transitive npm to 11.21.0 ([d4520ce](https://github.com/IMXEren/prowl/commit/d4520ceebd4ad773ece52b6637be4ff84e0c7dd2))
+* **deps:** bump turbohtml to 1.15.1 ([b6d973f](https://github.com/IMXEren/prowl/commit/b6d973f4721442a5eb1e0ab124ce7bce79e13faa))
+* **deps:** update transitive handlebars ([3153e8b](https://github.com/IMXEren/prowl/commit/3153e8bc74479d72d2b679f5d79829f718d446d5))
+
 ## [2.0.0-dev.4](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.3...v2.0.0-dev.4) (2026-10-14)
 
 ### ⚠ BREAKING CHANGES
