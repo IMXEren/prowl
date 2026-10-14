@@ -2,12 +2,12 @@
 
 import json
 from collections.abc import Iterator
+from http.cookiejar import Cookie as JarCookie
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import ClassVar, Self, TypedDict
+from typing import Any, ClassVar, Self, TypedDict
 
 from pydoll.protocol.network.types import CookieParam as PyDollCookieParam
-from requests.cookies import create_cookie
 
 from prowl.browser.rwlock import RWLock
 
@@ -26,6 +26,35 @@ class Cookie(TypedDict):
     expires: float | None
     secure: bool
     httpOnly: bool
+
+
+def create_cookie(name: str, value: str, **kwargs: Any) -> JarCookie:
+    """Construct a Cookie with Requests-compatible defaults and scope flags."""
+    values: dict[str, Any] = {
+        "version": 0,
+        "name": name,
+        "value": value,
+        "port": None,
+        "domain": "",
+        "path": "/",
+        "secure": False,
+        "expires": None,
+        "discard": True,
+        "comment": None,
+        "comment_url": None,
+        "rest": {"HttpOnly": None},
+        "rfc2109": False,
+    }
+    unknown = set(kwargs) - values.keys()
+    if unknown:
+        msg = f"create_cookie() got unexpected keyword arguments: {list(unknown)}"
+        raise TypeError(msg)
+    values.update(kwargs)
+    values["port_specified"] = bool(values["port"])
+    values["domain_specified"] = bool(values["domain"])
+    values["domain_initial_dot"] = values["domain"].startswith(".")
+    values["path_specified"] = bool(values["path"])
+    return JarCookie(**values)
 
 
 class Cookies:
@@ -52,17 +81,18 @@ class Cookies:
     def load_to_cookie_jar(self: Self) -> CookieJar:
         """Loads the stored cookies into the cookie jar."""
         cookie_jar = CookieJar()
-        for _cookie in self.cookies:
-            cookie = create_cookie(  # type: ignore[no-untyped-call]
-                name=_cookie["name"],
-                value=_cookie["value"],
-                domain=_cookie["domain"],
-                path=_cookie["path"],
-                expires=_cookie["expires"],
-                secure=_cookie["secure"],
-                rest={"HttpOnly": _cookie["httpOnly"]},
+        for cookie in self.cookies:
+            cookie_jar.set_cookie(
+                create_cookie(
+                    name=cookie["name"],
+                    value=cookie["value"],
+                    domain=cookie["domain"],
+                    path=cookie["path"],
+                    expires=cookie["expires"],
+                    secure=cookie["secure"],
+                    rest={"HttpOnly": cookie["httpOnly"]},
+                )
             )
-            cookie_jar.set_cookie(cookie)
         return cookie_jar
 
     @staticmethod

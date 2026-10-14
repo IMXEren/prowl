@@ -18,7 +18,6 @@ from pydoll.commands.target_commands import TargetCommands
 from pydoll.protocol.dom.types import Node as PDNode
 from pydoll.protocol.fetch.events import FetchEvent
 from pydoll.protocol.fetch.types import RequestStage
-from requests.structures import CaseInsensitiveDict
 from turbohtml import Element, Html, Node, Text
 from turbohtml import parse as tb_parse
 
@@ -30,6 +29,7 @@ from prowl.browser.solvers import ChallengeSolver, CloudflareSolver, click_embed
 from prowl.browser.solvers.cloudflare import find_and_click_turnstile
 from prowl.browser.utils import run_coroutine_sync
 from prowl.shutdown import get_process_cancel_token
+from prowl.structures import CaseInsensitiveDict
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Mapping
@@ -49,7 +49,7 @@ class PageResponse:
         self: Self,
         source: str,
         status_code: str | int | None = None,
-        headers: dict[str, str] | CaseInsensitiveDict | None = None,  # type: ignore[type-arg]
+        headers: dict[str, str] | CaseInsensitiveDict[str] | None = None,
         user_agent: str | None = None,
         url: str | None = None,
         screenshot: str | None = None,
@@ -74,7 +74,7 @@ class PageResponse:
 
     def __default__(self: Self) -> None:
         """Set attributes to default non-None values."""
-        self.headers: CaseInsensitiveDict = CaseInsensitiveDict()  # type: ignore[type-arg]
+        self.headers: CaseInsensitiveDict[str] = CaseInsensitiveDict()
 
     @property
     def text(self: Self) -> str:
@@ -90,10 +90,7 @@ class PageResponse:
         :raises JSONExtractError: If the json extraction impl
             fails or no such json.
 
-        The idea is basically that if the content view shows raw json,
-        then it's possible to extract it. As done using `requests` package,
-        i.e. if this fails with `JSONExtractError` then most likely `requests`
-        would also fail for the same.
+        Extract JSON displayed by the browser in a body-level ``pre`` element.
         """
         doc = tb_parse(self.text)
         data = doc.select_one("body > pre")
@@ -126,7 +123,7 @@ class PageHandler:
             raise PageLoadError(msg)
         self.status_code: int | str | None = None
         self.response_found: bool = False
-        self.response_headers: CaseInsensitiveDict | None = None  # type: ignore[type-arg]
+        self.response_headers: CaseInsensitiveDict[str] | None = None
         self.redirected_url: str | None = None
         self.cf_encountered: bool = False
         self.cf_encountered_on_url: str | None = None
@@ -958,8 +955,8 @@ def _are_urls_equal(current_url: str | None, target_url: str | None) -> bool:
         return False
 
 
-def _generate_headers(headers: list[dict[str, str]]) -> CaseInsensitiveDict:  # type: ignore[type-arg]
-    gen_headers: CaseInsensitiveDict = CaseInsensitiveDict()  # type: ignore[type-arg]
+def _generate_headers(headers: list[dict[str, str]]) -> CaseInsensitiveDict[str]:
+    gen_headers: CaseInsensitiveDict[str] = CaseInsensitiveDict()
     for _header in headers:
         gen_headers.update({_header["name"]: _header["value"]})
     return gen_headers
