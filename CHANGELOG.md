@@ -1,3 +1,13 @@
+## [2.0.0-dev.4](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.3...v2.0.0-dev.4) (2026-10-14)
+
+### ⚠ BREAKING CHANGES
+
+* **routing:** Fetch requests without mode now use auto routing instead of browser-only execution. Set mode to browser to retain JavaScript rendering on every fetch.
+
+### New Features
+
+* **routing:** default fetch execution mode to auto ([6ceec3d](https://github.com/IMXEren/prowl/commit/6ceec3d80322c2778d513a9f87d78143c51dca7d))
+
 ## [2.0.0-dev.3](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.2...v2.0.0-dev.3) (2026-10-14)
 
 ### Bug Fixes
