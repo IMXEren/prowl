@@ -1,3 +1,66 @@
+## [2.0.0-dev.5](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.4...v2.0.0-dev.5) (2026-10-14)
+
+### Dependencies
+
+* **deps:** bump cloakbrowser to 0.6.3 ([fe3fe47](https://github.com/IMXEren/prowl/commit/fe3fe47ae77d4a3b0830f7a0fa1f2df7ad2b1d20))
+* **deps:** bump cryptography to 50.0.2 ([9ed8180](https://github.com/IMXEren/prowl/commit/9ed8180ddb13758487f05441733ca38f26737051))
+* **deps:** bump curl_cffi to 0.16.3 ([f5815b2](https://github.com/IMXEren/prowl/commit/f5815b260cfeba2d8fce6167cc0b825008bc2618))
+* **deps:** bump pycryptodome to 4.0.0 ([a053b66](https://github.com/IMXEren/prowl/commit/a053b663aa055149515863a5b875421f9b50d11f))
+* **deps:** bump ruff to 0.17.0 ([920c5c4](https://github.com/IMXEren/prowl/commit/920c5c4386fe9006461c9a8c3d2c2e8e8f1c8b27))
+* **deps:** bump transitive npm to 11.21.0 ([d4520ce](https://github.com/IMXEren/prowl/commit/d4520ceebd4ad773ece52b6637be4ff84e0c7dd2))
+* **deps:** bump turbohtml to 1.15.1 ([b6d973f](https://github.com/IMXEren/prowl/commit/b6d973f4721442a5eb1e0ab124ce7bce79e13faa))
+* **deps:** update transitive handlebars ([3153e8b](https://github.com/IMXEren/prowl/commit/3153e8bc74479d72d2b679f5d79829f718d446d5))
+
+## [2.0.0-dev.4](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.3...v2.0.0-dev.4) (2026-10-14)
+
+### ⚠ BREAKING CHANGES
+
+* **routing:** Fetch requests without mode now use auto routing instead of browser-only execution. Set mode to browser to retain JavaScript rendering on every fetch.
+
+### New Features
+
+* **routing:** default fetch execution mode to auto ([6ceec3d](https://github.com/IMXEren/prowl/commit/6ceec3d80322c2778d513a9f87d78143c51dca7d))
+
+## [2.0.0-dev.3](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.2...v2.0.0-dev.3) (2026-10-14)
+
+### Bug Fixes
+
+* **typing:** use generator annotations for context managers ([f305bc8](https://github.com/IMXEren/prowl/commit/f305bc864312c6d97c35210a05a8cf9c900d9ee8))
+
+### Refactoring
+
+* replace direct requests helper dependencies ([fafdf0d](https://github.com/IMXEren/prowl/commit/fafdf0d464fdf08a0792a49ae63e19d6dad4a8b5))
+* **structures:** relocate and clean up RWLock ([d2e6abf](https://github.com/IMXEren/prowl/commit/d2e6abfdf4bac4bdab4dcfa9ae39fa79734d6fcd))
+
+## [2.0.0-dev.2](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.1...v2.0.0-dev.2) (2026-10-14)
+
+### ⚠ BREAKING CHANGES
+
+* **captcha:** remove tabs_till_verify and turnstile_token. Use solveCaptcha (solve_captcha in Python) and captcha_provider/captcha_token instead.
+
+### New Features
+
+* **captcha:** unify widget solving behind solveCaptcha ([4b4c595](https://github.com/IMXEren/prowl/commit/4b4c595cce6bb6eb3eec2b315a9c33a25000184a))
+
+## [2.0.0-dev.1](https://github.com/IMXEren/prowl/compare/v1.2.0-dev.1...v2.0.0-dev.1) (2026-10-09)
+
+### ⚠ BREAKING CHANGES
+
+* **service:** PageHandler and PageResponse replace the Site and Source Python exports. The old browser.site and browser.egress import paths were removed.
+
+### New Features
+
+* **browser:** add isolated contexts, page handling, and challenge solvers ([56f425b](https://github.com/IMXEren/prowl/commit/56f425b80413ad80327be596f544eec8e5787079))
+* **proxy:** add authenticated bridge and forward-proxy primitives ([ace9d95](https://github.com/IMXEren/prowl/commit/ace9d956f89d6ab30498891701e4849e696a03ce))
+* **service:** add session-aware routing, persistence, and metrics ([9df9e30](https://github.com/IMXEren/prowl/commit/9df9e30337e6e4a2a57f803890c13bde2e5b6971))
+
+## [1.2.0-dev.1](https://github.com/IMXEren/prowl/compare/v1.1.0...v1.2.0-dev.1) (2026-09-26)
+
+### New Features
+
+* **browser:** isolate named egresses and configure launches ([bfb83d5](https://github.com/IMXEren/prowl/commit/bfb83d58b81791ca3992b79f1b83b9da138a3a7b))
+* **service:** support named egresses and interactive browser sessions ([886c203](https://github.com/IMXEren/prowl/commit/886c203e40f6685b8aa3946708f26e1f168ab3d4))
+
 ## [1.1.0](https://github.com/IMXEren/prowl/compare/v1.0.0...v1.1.0) (2026-09-23)
 
 ### Bug Fixes

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import contextlib
+import ctypes
 import enum
 import os
 import shutil
@@ -12,19 +14,30 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
+from urllib.parse import urlsplit
 
 from cloakbrowser import ensure_binary, launch_persistent_context_async
 from loguru import logger
 
-from prowl.browser.config import BrowserConfig, default_profile_archive, default_profile_dir
+from prowl.browser.config import (
+    BrowserConfig,
+    default_extensions_dir,
+    default_policy_dir,
+    default_profile_archive,
+    default_profile_dir,
+    default_window_size,
+)
 from prowl.browser.driver import (
     BrowserRuntimeState,
     DriverRemoteAttachConfig,
     DriverStartupConfig,
 )
 from prowl.browser.exceptions import BrowserShutdownError, BrowserStartError
+from prowl.browser.extensions import extension_launch_arguments
 from prowl.browser.fingerprint import FingerprintManager
+from prowl.browser.policies import apply_managed_policies
 from prowl.browser.profile import SearchEngineInjector
+from prowl.browser.proxy.bridge import BrowserProxyBridge, BrowserProxyBridgeError
 from prowl.shutdown import CoordinatorStateError, RegistrationToken, get_coordinator
 
 if TYPE_CHECKING:
@@ -43,6 +56,24 @@ class BrowserShutdownState(enum.Enum):
     FAILED = enum.auto()
 
 
+def _validate_proxy_launch(proxy_url: str | None) -> BrowserProxyBridge | None:
+    if proxy_url is None:
+        return None
+    try:
+        proxy = urlsplit(proxy_url)
+        authenticated = proxy.username is not None or proxy.password is not None
+    except ValueError:
+        msg = "invalid browser proxy configuration"
+        raise BrowserStartError(msg) from None
+    if not authenticated:
+        return None
+    try:
+        return BrowserProxyBridge(proxy_url)
+    except BrowserProxyBridgeError:
+        msg = "invalid authenticated browser proxy configuration"
+        raise BrowserStartError(msg) from None
+
+
 def get_free_port(preferred: int, fallback_range: range | None = None) -> int:
     """Return *preferred* if available, else the first free port in *fallback_range*."""
     candidates = (preferred, *(fallback_range or range(0)))
@@ -57,6 +88,121 @@ def get_free_port(preferred: int, fallback_range: range | None = None) -> int:
     raise RuntimeError(msg)
 
 
+#: Files Chromium writes to claim a profile directory, relative to the profile root.
+_SINGLETON_FILES: tuple[str, ...] = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
+
+def _pid_is_alive(pid: int) -> bool:
+    """Return whether *pid* names a live process on this machine."""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        return _windows_pid_is_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # The process exists, this user may just not signal it.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _windows_pid_is_alive(pid: int) -> bool:
+    """Return whether *pid* exists, without terminating it the way os.kill would.
+
+    On Windows ``os.kill`` terminates the target for any signal other than the two console
+    events, so a liveness probe has to ask for a handle instead.
+    """
+    process_query_limited_information = 0x1000
+    error_access_denied = 5
+    still_active = 259
+    inherit_handle = False
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(process_query_limited_information, inherit_handle, pid)
+    if not handle:
+        # A process this user may not open still exists.
+        return ctypes.get_last_error() == error_access_denied
+    exit_code = ctypes.c_ulong()
+    if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+        kernel32.CloseHandle(handle)
+        return False
+    kernel32.CloseHandle(handle)
+    # A finished process keeps its pid reserved while a handle to it is still held, so the exit
+    # code decides liveness here, not whether a handle could be opened at all.
+    return exit_code.value == still_active
+
+
+def _singleton_lock_owner(lock: Path) -> str | None:
+    """Return the ``host-pid`` owner recorded in *lock*, or ``None`` when there is none."""
+    try:
+        if lock.is_symlink():
+            return str(lock.readlink())
+        if lock.exists():
+            return lock.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return None
+    return None
+
+
+def _singleton_owner_is_alive(owner: str) -> bool:
+    """Return whether the ``host-pid`` claim in *owner* is a process on this machine."""
+    host, separator, pid_text = owner.rpartition("-")
+    if not separator:
+        return False
+    if host != socket.gethostname():
+        # Another host wrote this claim. A container that was replaced reports the id of the
+        # container that is gone, so the process it names cannot be running here.
+        return False
+    try:
+        pid = int(pid_text)
+    except ValueError:
+        return False
+    return _pid_is_alive(pid)
+
+
+def clear_stale_singleton_files(profile_dir: str | Path) -> list[str]:
+    """Remove Chromium's profile claim when the process that wrote it is gone.
+
+    Chromium records the owning host and process in a ``SingletonLock`` and refuses to start
+    while it finds a claim it cannot disprove, so a profile left behind by a killed process, or
+    by a container that no longer exists, fails with "the profile appears to be in use by another
+    process on another computer" until the claim is cleared by hand. A claim whose owner is
+    still alive is left alone, because that really is a running browser.
+
+    :return: the names of the files that were removed.
+    """
+    profile = Path(profile_dir)
+    owner = _singleton_lock_owner(profile / "SingletonLock")
+    if owner is None or _singleton_owner_is_alive(owner):
+        return []
+
+    removed: list[str] = []
+    for name in _SINGLETON_FILES:
+        with contextlib.suppress(OSError):
+            (profile / name).unlink()
+            removed.append(name)
+    if removed:
+        logger.info(f"Cleared a stale browser profile claim: {', '.join(removed)}.")
+    return removed
+
+
+def default_viewport() -> dict[str, int]:
+    """Return the page viewport, following a configured window size when there is one.
+
+    The viewport is what the page lays out in, and it is not the same thing as the window: the window
+    can be fitted to a display while the viewport stays at the persona's size, and then the layout is
+    wider than the window with its right-hand side out of reach. A configured window size therefore
+    sets the viewport too, so the page lays out at the size that is actually shown.
+    """
+    size = default_window_size()
+    if size is not None:
+        return {"width": size[0], "height": size[1]}
+    return {"width": 1920, "height": 980}
+
+
 @dataclass(slots=True)
 class BrowserLifecycle:
     """Concrete lifecycle owner for startup and profile configuration."""
@@ -65,19 +211,29 @@ class BrowserLifecycle:
     profile_dir: str = field(default_factory=default_profile_dir)
     profile_archive: Path = field(default_factory=lambda: Path(default_profile_archive()))
     checked_binary: bool = False
+    #: Cumulative recovery restarts of a dead owned generation, kept across generations.
+    browser_restart_total: int = 0
     cdp_port: int = 9222
     fingerprint: FingerprintManager | None = None
     fingerprint_options: ChromiumOptions | None = None
-    viewport: dict[str, int] = field(default_factory=lambda: {"width": 1920, "height": 980})
+    viewport: dict[str, int] = field(default_factory=default_viewport)
     locale: str = "en-US,en"
     proxy_url: str | None = field(
         default_factory=lambda: os.environ.get("PROWL_PROXY_URL", "").strip() or None,
+        repr=False,
     )
+    _proxy_bridge: BrowserProxyBridge | None = field(default=None, init=False, repr=False)
+    #: Directory of unpacked extensions every browser loads, or ``None`` for none.
+    extensions_dir: str | None = field(default_factory=default_extensions_dir)
+    #: Directory of managed policy JSON applied before every launch, or ``None``.
+    policy_dir: str | None = field(default_factory=default_policy_dir)
+    #: Window size the browser is launched with, or ``None`` for the fingerprint screen size.
+    window_size: tuple[int, int] | None = field(default_factory=default_window_size)
     _startup_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _shutdown_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _shutdown_state: BrowserShutdownState = BrowserShutdownState.NOT_STARTED
     _shutdown_error: BrowserShutdownError | None = None
-    _shutdown_task: asyncio.Task[None] | None = None
+    _shutdown_task: asyncio.Task[BrowserShutdownError | None] | None = None
     _atexit_registered: bool = False
     _owns_local_profile: bool = False
     _signal_registration: RegistrationToken | None = None
@@ -104,12 +260,19 @@ class BrowserLifecycle:
 
         :raises BrowserStartError: when the browser is running or shutting down.
         """
-        if is_running() or self._shutdown_state is BrowserShutdownState.IN_PROGRESS:
+        if (
+            is_running()
+            or self._shutdown_state is BrowserShutdownState.IN_PROGRESS
+            or (self._proxy_bridge is not None and self.proxy_url != config.proxy_url)
+        ):
             msg = "Cannot reconfigure the browser while it is running or shutting down."
             raise BrowserStartError(msg)
         self.proxy_url = config.proxy_url
         self.profile_dir = config.profile_dir
         self.profile_archive = Path(config.profile_archive)
+        self.extensions_dir = config.extensions_dir
+        self.policy_dir = config.policy_dir
+        self.window_size = config.window_size
 
     # -- Profile helpers ------------------------------------------------------------
 
@@ -128,6 +291,13 @@ class BrowserLifecycle:
         logger.info(f"Extracting profile from {pkg} ...")
         shutil.unpack_archive(str(pkg), str(target))
         return True
+
+    def restore_profile_from_archive(self) -> bool:
+        """Restore only into a missing or empty profile; existing live state is authoritative."""
+        target = Path(self.profile_dir)
+        if target.is_dir() and any(target.iterdir()):
+            return False
+        return self.unpack_profile()
 
     def pack_profile(self, archive: str | Path | None = None) -> Path | None:
         """Zip the owned profile directory into *archive*, skipping caches."""
@@ -186,6 +356,38 @@ class BrowserLifecycle:
 
     # -- Start / connect ------------------------------------------------------------
 
+    async def _retire_stale_generation(self) -> None:
+        """Retire a dead owned generation; external browsers require explicit reconnect.
+
+        A failed retirement keeps whatever it could not close, so this looks at every native
+        client projection rather than the persistent context alone: a generation that closed
+        its persistent context but not its CDP clients still has to retire them before a
+        launch. Ownership is what separates an owned local generation from an externally
+        attached browser, so a partial unowned attachment still refuses an implicit launch.
+
+        :raises BrowserStartError: when the stale generation is an externally attached browser.
+        """
+        driver = self.driver
+        remaining = (
+            getattr(driver, "main_ctx", None),
+            getattr(driver, "shared_pd", None),
+            getattr(driver, "cdp_browser", None),
+            getattr(driver, "cdp_playwright", None),
+        )
+        if all(client is None for client in remaining):
+            return
+        if not driver.main_ctx_owned:
+            msg = (
+                "The attached remote browser is no longer connected. "
+                "Reconnect explicitly before starting a local browser."
+            )
+            raise BrowserStartError(msg)
+        await driver.rollback_start()
+        # The dead generation is retired; a failed rollback keeps it live for a retry.
+        self.browser_restart_total += 1
+        # A crashed generation's live profile is not packaged over its archive.
+        self._owns_local_profile = False
+
     async def start(
         self,
         *,
@@ -197,6 +399,7 @@ class BrowserLifecycle:
         OS signal installation is owned by prowl.shutdown; this method only
         performs browser-specific launch and atexit registration.
         """
+        proxy_bridge = _validate_proxy_launch(self.proxy_url)
         self._admit_start()
         if is_running():
             self._register_signal_cleanup()
@@ -208,7 +411,11 @@ class BrowserLifecycle:
                 self._register_signal_cleanup()
                 return
 
-            self.unpack_profile()
+            await self._retire_stale_generation()
+            self.restore_profile_from_archive()
+            # Clear a claim left by a process that is no longer running, before any launch,
+            # including the priming launch below, or that launch fails the same way.
+            clear_stale_singleton_files(self.profile_dir)
             if not self.checked_binary:
                 ensure_binary()
                 self.checked_binary = True
@@ -221,18 +428,21 @@ class BrowserLifecycle:
             }
             self.fingerprint = FingerprintManager(profile)
             self.fingerprint_options = self.fingerprint.options
-            launch_arguments = list(self.fingerprint.options.arguments)
-            if self.proxy_url:
-                # One browser and one profile have exactly one egress. The URL is
-                # never logged or echoed so proxy credentials cannot leak.
-                launch_arguments.append(f"--proxy-server={self.proxy_url}")
-
-            if not self.webdata_path().exists():
-                await self._prime_profile(launch_arguments)
-
-            self._inject_search_engine()
+            # Chromium reads managed policy as it starts, so the files are in place first.
+            apply_managed_policies(self.policy_dir)
+            launch_arguments = await self._launch_arguments(proxy_bridge)
 
             try:
+                if not self.webdata_path().exists():
+                    await self._prime_profile(launch_arguments)
+            except BaseException:
+                if self._proxy_bridge is not None:
+                    await self._proxy_bridge.aclose()
+                    self._proxy_bridge = None
+                raise
+
+            try:
+                self._inject_search_engine()
                 await self.driver.start_live(
                     DriverStartupConfig(
                         profile_dir=self.profile_dir,
@@ -254,6 +464,9 @@ class BrowserLifecycle:
                 self._unregister_atexit()
                 self._unregister_signal_cleanup()
                 await self.driver.rollback_start()
+                if self._proxy_bridge is not None:
+                    await self._proxy_bridge.aclose()
+                    self._proxy_bridge = None
                 msg = "failed to start the browser"
                 raise BrowserStartError(msg) from e
 
@@ -290,57 +503,31 @@ class BrowserLifecycle:
     # -- Cleanup resources ----------------------------------------------------------
 
     async def _cleanup_resources(self) -> None:
-        """Close browser resources and run final synchronous profile chores."""
-        try:
-            await self.driver.close_all_groups_and_pages()
-        except BaseException:  # noqa: BLE001
-            logger.error("Failed to close browser groups and pages")
+        """Retire the browser generation and run final synchronous profile chores.
 
-        if self.driver.shared_pd is not None:
-            logger.debug("Closing the pydoll connection...")
-            try:
-                await self.driver.shared_pd.close()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to close PyDoll during cleanup")
-            finally:
-                self.driver.shared_pd = None
-
-        if self.driver.main_ctx is not None and self.driver.main_ctx_owned:
-            logger.debug("Closing main persistent context...")
-            try:
-                await self.driver.main_ctx.close()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to close Playwright context during cleanup")
-        self.driver.main_ctx = None
-        self.driver.main_ctx_owned = False
-
-        if self.driver.cdp_browser is not None:
-            logger.debug("Closing Playwright CDP browser...")
-            try:
-                await self.driver.cdp_browser.close()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to close Playwright CDP browser during cleanup")
-            self.driver.cdp_browser = None
-
-        if self.driver.cdp_playwright is not None:
-            logger.debug("Stopping Playwright CDP owner...")
-            try:
-                await self.driver.cdp_playwright.stop()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to stop Playwright during cleanup")
-            self.driver.cdp_playwright = None
-
+        Retirement is the driver's single native close path, so every client projection is
+        closed there, in order, exactly once, and finished ownership is released there. A
+        close that fails propagates instead of being discarded, so retained resources reach
+        ``_do_shutdown`` as FAILED rather than being reported as a clean shutdown. The
+        profile is packaged only after retirement released every client projection.
+        """
+        await self.driver.rollback_start()
+        if self._proxy_bridge is not None:
+            await self._proxy_bridge.aclose()
+            self._proxy_bridge = None
         self.do_sync_chores_before_exit()
 
-    async def _do_shutdown(self) -> None:
+    async def _do_shutdown(self) -> BrowserShutdownError | None:
         """Own cleanup execution and terminal state finalization."""
         try:
             await self._cleanup_resources()
         except BaseException as exc:  # noqa: BLE001
             self._shutdown_state = BrowserShutdownState.FAILED
             self._shutdown_error = BrowserShutdownError(exc)
+            return self._shutdown_error
         else:
             self._shutdown_state = BrowserShutdownState.SUCCEEDED
+            return None
         finally:
             self._unregister_signal_cleanup()
             self._unregister_atexit()
@@ -395,39 +582,40 @@ class BrowserLifecycle:
 
     # -- Shutdown with cancellation resilience --------------------------------------
 
-    async def shutdown(self) -> None:
+    async def shutdown(self, *, retry: bool = False) -> None:
         """Gracefully tear down all browser resources once per generation.
 
         The owner must tolerate repeated CancelledError while awaiting the
         same shielded cleanup task to terminal SUCCEEDED / FAILED state.
         Cancellation is immediately propagated; the shielded cleanup task
         continues independently to its terminal outcome.
+
+        A failed cleanup is cached and re-raised, so a later ordinary call reports the same
+        failure instead of closing a second time. *retry* restarts that failed cleanup under
+        the same lock with one newly owned task, clearing the cached failure it retires.
         """
         shutdown_state = self._shutdown_state
         if shutdown_state is BrowserShutdownState.SUCCEEDED:
             return
-        if shutdown_state is BrowserShutdownState.FAILED:
-            if self._shutdown_error is None:
-                msg = "Invariant: FAILED without _shutdown_error"
-                raise BrowserShutdownError(msg)
-            raise self._shutdown_error
+        if shutdown_state is BrowserShutdownState.FAILED and not retry:
+            self._raise_cached_failure()
 
         async with self._shutdown_lock:
             # Re-check terminal states after acquiring the lock.
             shutdown_state = self._shutdown_state
             if shutdown_state is BrowserShutdownState.SUCCEEDED:
                 return
-            if shutdown_state is BrowserShutdownState.FAILED:
-                if self._shutdown_error is None:
-                    msg = "Invariant: FAILED without _shutdown_error"
-                    raise BrowserShutdownError(msg)
-                raise self._shutdown_error
+            if shutdown_state is BrowserShutdownState.FAILED and not retry:
+                self._raise_cached_failure()
 
             existing_task = self._shutdown_task
             if existing_task is not None and not existing_task.done():
                 # Capture reference for awaiting outside the lock.
-                cleanup_to_await: asyncio.Task[None] = existing_task
+                cleanup_to_await: asyncio.Task[BrowserShutdownError | None] = existing_task
             else:
+                # A retried attempt retires the cached failure it replaces, and the task it
+                # starts is the only cleanup that describes this attempt.
+                self._shutdown_error = None
                 self._shutdown_state = BrowserShutdownState.IN_PROGRESS
                 cleanup_to_await = asyncio.get_running_loop().create_task(
                     self._do_shutdown(),
@@ -438,19 +626,30 @@ class BrowserLifecycle:
         # Await the shielded cleanup outside the lock so waiters can enter.
         # Cancellation propagates immediately; the shielded cleanup task
         # survives and will reach terminal independently.
-        await asyncio.shield(cleanup_to_await)
+        failure = await asyncio.shield(cleanup_to_await)
+        if failure is not None:
+            raise failure
 
-        if self._shutdown_state is BrowserShutdownState.FAILED:
-            if self._shutdown_error is None:  # pragma: no cover
-                msg = "Invariant: FAILED without _shutdown_error"
-                raise BrowserShutdownError(msg)
-            raise self._shutdown_error
+    async def retry_shutdown(self) -> None:
+        """Retry a failed cleanup so the native side can retire what the failure left live."""
+        await self.shutdown(retry=True)
+
+    def _raise_cached_failure(self) -> None:
+        """Raise the cached cleanup failure, or the invariant error when it is missing."""
+        if self._shutdown_error is None:
+            msg = "Invariant: FAILED without _shutdown_error"
+            raise BrowserShutdownError(msg)
+        raise self._shutdown_error
 
     # -- Synchronous chores ---------------------------------------------------------
 
     def do_sync_chores_before_exit(self) -> None:
-        """Run bounded synchronous cleanup needed before process exit."""
-        if self._owns_local_profile:
+        """Run bounded synchronous cleanup needed before process exit.
+
+        A generation whose native clients are still owned stays live, so its profile is left
+        alone rather than archived underneath it.
+        """
+        if self._owns_local_profile and not self.driver.main_ctx_owned:
             self.pack_profile()
             self._owns_local_profile = False
 
@@ -469,6 +668,31 @@ class BrowserLifecycle:
             logger.error("Sync last-minute chores failed!")
 
     # -- Profile priming ------------------------------------------------------------
+
+    async def _launch_arguments(self, proxy_bridge: BrowserProxyBridge | None) -> list[str]:
+        """Use one credential-free proxy argument for both priming and live launch."""
+        if self.fingerprint_options is None:
+            msg = "browser fingerprint is not ready"
+            raise BrowserStartError(msg)
+        launch_arguments = list(self.fingerprint_options.arguments)
+        if self.window_size is not None:
+            launch_arguments = [arg for arg in launch_arguments if not arg.startswith("--window-size=")]
+            launch_arguments.append(f"--window-size={self.window_size[0]},{self.window_size[1]}")
+        launch_arguments.append("--window-position=0,0")
+        if proxy_bridge is not None:
+            if self._proxy_bridge is None:
+                await proxy_bridge.start()
+                self._proxy_bridge = proxy_bridge
+            proxy_server = self._proxy_bridge.listen_url
+            if proxy_server is None:
+                msg = "proxy bridge is not listening"
+                raise BrowserStartError(msg)
+        else:
+            proxy_server = self.proxy_url
+        if proxy_server:
+            launch_arguments.append(f"--proxy-server={proxy_server}")
+        launch_arguments.extend(extension_launch_arguments(self.extensions_dir))
+        return launch_arguments
 
     async def _prime_profile(self, launch_arguments: list[str]) -> None:
         """Launch and close a headless context before Web Data injection."""
