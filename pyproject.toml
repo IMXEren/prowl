@@ -32,6 +32,9 @@ dev = [
     "ruff==0.17.0",
     "build>=1.2",
 ]
+vision = [
+    "Pillow==12.3.0",
+]
 
 [project.scripts]
 prowl = "prowl.cli:main"

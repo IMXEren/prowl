@@ -814,6 +814,44 @@ def execution_payload(
     return execution
 
 
+#: The visual outcome statuses a reply may report. Anything else is omitted from the wire.
+VISION_STATUSES: Final[frozenset[str]] = frozenset(
+    {"handled", "unsupported", "needs_human", "timed_out", "error"},
+)
+
+#: Only these reasons may cross the service wire; arbitrary backend text is omitted.
+VISION_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "low_confidence",
+        "timed_out",
+        "error",
+        "page_accepted",
+        "stale_revision",
+        "origin_lost",
+        "detection_mapping_unsupported",
+        "challenge_unavailable",
+        "empty_selection",
+        "page_not_accepted",
+        "unsupported_layout",
+        "replacement_unavailable",
+        "ambiguous_selection",
+        "replacement_limit",
+        "page_limit",
+    },
+)
+
+
+def vision_payload(status: str | None, reason: str | None) -> dict[str, Any] | None:
+    """Return a wire-safe visual outcome, or ``None`` for an unknown status or reason."""
+    if status not in VISION_STATUSES or reason not in VISION_REASONS:
+        return None
+    if (status == "handled") != (reason == "page_accepted"):
+        return None
+    if status in {"timed_out", "error"} and reason != status:
+        return None
+    return {"status": status, "reason": reason}
+
+
 def solution_payload(  # noqa: PLR0913
     *,
     url: str,
@@ -826,11 +864,14 @@ def solution_payload(  # noqa: PLR0913
     screenshot: str | None = None,
     captcha_provider: str | None = None,
     captcha_token: str | None = None,
+    vision_status: str | None = None,
+    vision_reason: str | None = None,
 ) -> dict[str, Any]:
     """Build the FlareSolverr ``solution`` object.
 
     ``execution``, ``screenshot`` and CAPTCHA fields are optional. Omitting them keeps the
-    object exactly the shape a browser fetch has always reported.
+    object exactly the shape a browser fetch has always reported. A visual outcome is added only
+    when its status and reason are both recognized fixed values.
     """
     solution = {
         "url": url,
@@ -847,6 +888,9 @@ def solution_payload(  # noqa: PLR0913
     if captcha_provider is not None and captcha_token is not None:
         solution["captcha_provider"] = captcha_provider
         solution["captcha_token"] = captcha_token
+    vision = vision_payload(vision_status, vision_reason)
+    if vision is not None:
+        solution["vision"] = vision
     return solution
 
 

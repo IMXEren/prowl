@@ -344,8 +344,10 @@ class FetchOptionShapeTests(TestCase):
 
         self.assertIsNone(result.screenshot)
         self.assertEqual(
-            list(FetchResult.__dataclass_fields__)[-3:],
-            ["screenshot", "captcha_provider", "captcha_token"],
+            list(FetchResult.__dataclass_fields__)[-5:],
+            ["screenshot", "captcha_provider", "captcha_token", "vision_status", "vision_reason"],
         )
         self.assertIsNone(result.captcha_provider)
         self.assertIsNone(result.captcha_token)
+        self.assertIsNone(result.vision_status)
+        self.assertIsNone(result.vision_reason)

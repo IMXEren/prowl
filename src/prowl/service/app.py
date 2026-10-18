@@ -42,6 +42,20 @@ from prowl.browser.proxy.egress import (
     parse_egress_spec,
 )
 from prowl.browser.proxy.server import ProxyServer
+from prowl.browser.solvers.vision.config import (
+    VISION_ENABLED_ENV,
+    VISION_VLM_API_KEY_ENV,
+    VISION_VLM_ENABLED_ENV,
+    VISION_VLM_ENDPOINT_ENV,
+    VISION_VLM_HEADERS_ENV,
+    VISION_VLM_MODEL_ENV,
+    VISION_VLM_REASONING_EFFORT_ENV,
+    CloudVlmSettings,
+    build_cloud_vlm_settings,
+    build_vision_settings,
+    parse_vision_enabled,
+    parse_vision_vlm_enabled,
+)
 from prowl.service.backend import (
     DEFAULT_INTERACTIVE_IDLE_SECONDS,
     DEFAULT_STEAL_LEAST_RECENT,
@@ -233,6 +247,23 @@ class ServiceConfig:
     #: Optional private root for isolated session storage state. Unset by default, so a process
     #: keeps no session state on disk until an operator names a directory.
     session_state_dir: str | None = None
+    #: Operator opt-in for the controlled vision adapter. Off by default, so an ordinary or
+    #: unapproved page never triggers visual work.
+    vision_enabled: bool = False
+    #: Operator opt-in for the remote cloud VLM interpreter. Off by default and requires
+    #: ``vision_enabled`` plus a configured endpoint and model.
+    vision_vlm_enabled: bool = False
+    #: Exact HTTPS or loopback HTTP OpenAI-compatible multimodal chat POST URL. Required when the
+    #: VLM interpreter is enabled.
+    vision_vlm_endpoint: str | None = field(default=None, repr=False)
+    #: Provider or gateway model identifier sent to the VLM endpoint. Required when enabled.
+    vision_vlm_model: str | None = field(default=None, repr=False)
+    #: Optional provider API key sent as a bearer token; unset for a local gateway.
+    vision_vlm_api_key: str | None = field(default=None, repr=False)
+    #: Optional JSON object of explicit VLM request headers; no values appear in config repr.
+    vision_vlm_headers: str | None = field(default=None, repr=False)
+    #: Optional Responses reasoning level; unset keeps the provider default.
+    vision_vlm_reasoning_effort: str | None = field(default=None, repr=False)
     #: Port for the integrated forward proxy listener. ``None`` disables it entirely; ``0`` asks
     #: the operating system for an ephemeral port.
     forward_proxy_port: int | None = None
@@ -259,13 +290,33 @@ class ServiceConfig:
         if self.proxy_ca_cert is not None and self.forward_proxy_port is None:
             msg = f"{PROXY_CA_CERT_ENV} requires {FORWARD_PROXY_PORT_ENV}"
             raise ValueError(msg)
+        if not isinstance(self.vision_enabled, bool):
+            msg = f"{VISION_ENABLED_ENV} must be a boolean"
+            raise ValueError(msg)  # noqa: TRY004 - a programmatic flag error stays a ValueError for callers
+        if not isinstance(self.vision_vlm_enabled, bool):
+            msg = f"{VISION_VLM_ENABLED_ENV} must be a boolean"
+            raise ValueError(msg)  # noqa: TRY004 - a programmatic flag error stays a ValueError for callers
+        vlm: CloudVlmSettings | None = None
+        if self.vision_vlm_enabled:
+            if not self.vision_enabled:
+                msg = f"{VISION_VLM_ENABLED_ENV} requires {VISION_ENABLED_ENV}"
+                raise ValueError(msg)
+            vlm = build_cloud_vlm_settings(
+                endpoint=self.vision_vlm_endpoint,
+                model=self.vision_vlm_model,
+                api_key=self.vision_vlm_api_key,
+                reasoning_effort=self.vision_vlm_reasoning_effort,
+                headers=self.vision_vlm_headers,
+            )
+        if self.vision_enabled:
+            build_vision_settings(vlm=vlm)
 
     @classmethod
     def from_env(cls) -> ServiceConfig:
         """Build configuration from environment variables.
 
         :raises EgressError: when the egress list or one of its URLs is unusable.
-        :raises ValueError: when the process-wide proxy URL is unusable.
+        :raises ValueError: when the process-wide proxy URL or an enabled vision setting is unusable.
         """
         proxy_url = os.environ.get(PROXY_URL_ENV, "").strip() or None
         if proxy_url is not None:
@@ -277,6 +328,19 @@ class ServiceConfig:
             except ValueError as exc:
                 msg = f"{EGRESSES_ENV} egress {name!r} is unusable: {exc}"
                 raise EgressError(msg) from exc
+        vision_enabled = parse_vision_enabled(os.environ.get(VISION_ENABLED_ENV))
+        vision_vlm_enabled = parse_vision_vlm_enabled(os.environ.get(VISION_VLM_ENABLED_ENV))
+        vision_vlm_endpoint: str | None = None
+        vision_vlm_model: str | None = None
+        vision_vlm_api_key: str | None = None
+        vision_vlm_headers: str | None = None
+        vision_vlm_reasoning_effort: str | None = None
+        if vision_vlm_enabled:
+            vision_vlm_endpoint = os.environ.get(VISION_VLM_ENDPOINT_ENV, "").strip() or None
+            vision_vlm_model = os.environ.get(VISION_VLM_MODEL_ENV, "").strip() or None
+            vision_vlm_api_key = os.environ.get(VISION_VLM_API_KEY_ENV, "").strip() or None
+            vision_vlm_headers = os.environ.get(VISION_VLM_HEADERS_ENV, "").strip() or None
+            vision_vlm_reasoning_effort = os.environ.get(VISION_VLM_REASONING_EFFORT_ENV, "").strip() or None
         return cls(
             host=os.environ.get("PROWL_HOST", "0.0.0.0"),  # noqa: S104
             port=int(os.environ.get("PROWL_PORT", "8191")),
@@ -297,6 +361,13 @@ class ServiceConfig:
             forward_proxy_port=_forward_proxy_port(),
             proxy_ca_cert=os.environ.get(PROXY_CA_CERT_ENV, "").strip() or None,
             proxy_ca_key=os.environ.get(PROXY_CA_KEY_ENV, "").strip() or None,
+            vision_enabled=vision_enabled,
+            vision_vlm_enabled=vision_vlm_enabled,
+            vision_vlm_endpoint=vision_vlm_endpoint,
+            vision_vlm_model=vision_vlm_model,
+            vision_vlm_api_key=vision_vlm_api_key,
+            vision_vlm_headers=vision_vlm_headers,
+            vision_vlm_reasoning_effort=vision_vlm_reasoning_effort,
         )
 
 
@@ -539,6 +610,8 @@ class Service:
             screenshot=result.screenshot if command.return_screenshot else None,
             captcha_provider=result.captcha_provider if command.solve_captcha else None,
             captcha_token=result.captcha_token if command.solve_captcha else None,
+            vision_status=result.vision_status if command.solve_captcha else None,
+            vision_reason=result.vision_reason if command.solve_captcha else None,
         )
         return ok_response(start, solution=solution)
 
@@ -883,6 +956,23 @@ def run_server(config: ServiceConfig | None = None, backend: Backend | None = No
         max_concurrency=resolved.max_concurrency,
         state_store=(
             ContextStateStore(Path(resolved.session_state_dir)) if resolved.session_state_dir is not None else None
+        ),
+        vision_settings=(
+            build_vision_settings(
+                vlm=(
+                    build_cloud_vlm_settings(
+                        endpoint=resolved.vision_vlm_endpoint,
+                        model=resolved.vision_vlm_model,
+                        api_key=resolved.vision_vlm_api_key,
+                        reasoning_effort=resolved.vision_vlm_reasoning_effort,
+                        headers=resolved.vision_vlm_headers,
+                    )
+                    if resolved.vision_vlm_enabled
+                    else None
+                ),
+            )
+            if resolved.vision_enabled
+            else None
         ),
     )
     app = create_app(resolved, browser_backend)

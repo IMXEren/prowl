@@ -23,6 +23,8 @@ use the browser directly to avoid replay.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import math
 import os
 import re
@@ -60,9 +62,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
     from playwright._impl._api_structures import SetCookieParam
+    from playwright.async_api import Page
     from pydoll.protocol.network.types import CookieParam
 
+    from prowl.browser.solvers.vision.config import VisionSettings
+    from prowl.browser.solvers.vision.schemas import CaptchaAttemptResult
     from prowl.service.classification import Classification
+    from prowl.vision.vlm import CloudVlmClient
 
 #: Cookie fields FlareSolverr clients expect in ``solution.cookies``.
 _COOKIE_FIELDS = ("name", "value", "domain", "path", "expires", "secure", "httpOnly", "sameSite")
@@ -162,6 +168,8 @@ class FetchResult:
     screenshot: str | None = None
     captcha_provider: str | None = None
     captcha_token: str | None = None
+    vision_status: str | None = None
+    vision_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -330,6 +338,7 @@ class BrowserBackend:
         max_concurrency: int = 0,
         metrics: Metrics | None = None,
         state_store: ContextStateStore | None = None,
+        vision_settings: VisionSettings | None = None,
     ) -> None:
         self._browser_config = browser_config
         self._pool = EgressPool(
@@ -368,6 +377,11 @@ class BrowserBackend:
         #: isolated context is seeded from its binding's snapshot and a session close persists or
         #: forgets that snapshot according to the cleanup reason it was given.
         self._state_store = state_store
+        #: Opt-in CAPTCHA settings; ``None`` keeps the provider-only browser path.
+        self._vision_settings = vision_settings
+        #: The optional shared cloud VLM client is created without opening a session and sends
+        #: no images until a selected CAPTCHA adapter requests one.
+        self._vision_vlm: CloudVlmClient | None = None
 
     @property
     def state_persistence_enabled(self) -> bool:
@@ -375,10 +389,34 @@ class BrowserBackend:
         return self._state_store is not None
 
     async def start(self) -> None:
-        """Apply launch configuration and start the default browser process."""
-        if self._browser_config is not None:
-            Browser.configure(self._browser_config)
-        await Browser.start()
+        """Apply launch configuration and start the default browser process.
+
+        A configured cloud VLM client validates its endpoint, model and credentials without
+        opening a session or making a request. Repeated starts reuse the owned client, and a
+        browser startup failure closes a client constructed by this call.
+        """
+        settings = self._vision_settings
+        constructed = False
+        try:
+            if settings is not None and settings.vlm is not None and self._vision_vlm is None:
+                from prowl.vision.vlm import CloudVlmClient  # noqa: PLC0415 - built only when enabled
+
+                self._vision_vlm = CloudVlmClient(
+                    settings.vlm.endpoint,
+                    settings.vlm.model,
+                    settings.vlm.api_key,
+                    reasoning_effort=settings.vlm.reasoning_effort,
+                    headers=dict(settings.vlm.headers),
+                )
+                constructed = True
+            if self._browser_config is not None:
+                Browser.configure(self._browser_config)
+            await Browser.start()
+        except BaseException:
+            if constructed:
+                with contextlib.suppress(Exception):
+                    await self._close_vision()
+            raise
 
     def render_metrics(self) -> str:
         """Combine default and named-owner resource snapshots with existing request metrics."""
@@ -1169,8 +1207,8 @@ class BrowserBackend:
         logger.debug(f"Interactive {entry.tab.tab_id} idle, closing.")
         await self.close_interactive(entry.tab.tab_id)
 
-    @staticmethod
     async def _fetch_in_group(
+        self,
         group: Any,
         request: FetchRequest,
         context: BrowserContextHandle | None,
@@ -1180,10 +1218,52 @@ class BrowserBackend:
             await tab.set_cookies(cast("list[CookieParam]", request.cookies))
 
         site = resolve_page_handler(group, request.url)
+        self._bind_vision(site)
         if request.disable_media:
             async with site.media_filter():
                 return await _fetch_site_result(site, group, request, context)
         return await _fetch_site_result(site, group, request, context)
+
+    def _bind_vision(self, site: PageHandler) -> None:
+        """Bind the enabled GeeTest and optional VLM CAPTCHA solvers to the selected handler."""
+        settings = self._vision_settings
+        if settings is None or not isinstance(site, PageHandler):
+            return
+        from prowl.browser.solvers.vision.geetest import solve_geetest_slide  # noqa: PLC0415 - enabled only
+
+        async def _geetest_slide(
+            page: Page, seconds_remaining: Callable[[], float], initial_tokens: frozenset[str]
+        ) -> CaptchaAttemptResult:
+            return await solve_geetest_slide(
+                page, seconds_remaining, initial_tokens=initial_tokens, native_tab=site.tab
+            )
+
+        site.vision_captcha_solvers["geetest"] = _geetest_slide
+        vlm = self._vision_vlm
+        if vlm is not None:
+            from prowl.browser.solvers.vision.hcaptcha import solve_hcaptcha_challenge  # noqa: PLC0415 - enabled only
+            from prowl.browser.solvers.vision.recaptcha import solve_recaptcha_challenge  # noqa: PLC0415 - enabled only
+
+            adapters = {"hcaptcha": solve_hcaptcha_challenge, "recaptcha": solve_recaptcha_challenge}
+
+            async def _challenge_solver(
+                page: Page,
+                seconds_remaining: Callable[[], float],
+                initial_tokens: frozenset[str],
+                *,
+                provider: str,
+            ) -> CaptchaAttemptResult:
+                return await adapters[provider](
+                    page,
+                    seconds_remaining,
+                    vlm_client=vlm,
+                    initial_tokens=initial_tokens,
+                    native_tab=site.tab,
+                )
+
+            site.vision_captcha_solvers.update(
+                {provider: functools.partial(_challenge_solver, provider=provider) for provider in adapters}
+            )
 
     async def aclose(self) -> None:
         """Close every interactive tab and isolated context, then shut every browser down.
@@ -1212,6 +1292,8 @@ class BrowserBackend:
                     await self.close_session(session_id, cleanup=cleanup)
             except Exception as exc:  # noqa: BLE001 - every session is attempted
                 failure = failure or exc
+        # Close the VLM client before the browser; retain it if cleanup fails.
+        vision_failure = await self._close_vision()
         if failure is not None and self._state_store is not None:
             # A state-store save, delete or context close failed. Surface it before shutting the
             # native owners down, so the retained session, its context and its claim can be retried.
@@ -1220,6 +1302,7 @@ class BrowserBackend:
             await self._http.aclose()
         except Exception as exc:  # noqa: BLE001 - every resource is attempted before the first failure is raised
             failure = failure or exc
+        failure = failure or vision_failure
         try:
             await Browser.shutdown()
         except Exception as exc:  # noqa: BLE001
@@ -1232,6 +1315,20 @@ class BrowserBackend:
         if failure is not None:
             raise failure
 
+    async def _close_vision(self) -> BaseException | None:
+        """Close the shared VLM client before the browser, retaining it on failure."""
+        failure: BaseException | None = None
+        client = self._vision_vlm
+        if client is not None:
+            try:
+                await client.aclose()
+            except Exception as exc:  # noqa: BLE001 - the browser is still shut down, and the retry keeps ownership
+                logger.warning(f"Failed to close the vision VLM client: {type(exc).__name__}")
+                failure = exc
+            else:
+                self._vision_vlm = None
+        return failure
+
 
 def _extract_title(html: str) -> str:
     """Return the document title carried in *html*, or an empty string."""
@@ -1240,7 +1337,7 @@ def _extract_title(html: str) -> str:
 
 
 def _context_handle_live(handle: BrowserContextHandle | None) -> bool:
-    """Read native liveness without navigation; legacy doubles may omit the browser projection."""
+    """Check native context liveness without navigation."""
     if handle is None:
         return False
     context = handle.context
@@ -1255,12 +1352,7 @@ def _context_handle_live(handle: BrowserContextHandle | None) -> bool:
 
 
 def _interactive_group_live(group: Any) -> bool:
-    """Whether an interactive group's native page still exists.
-
-    A group whose native context is closed or whose browser is disconnected is dead, and so is one
-    whose own page is closed. A group that exposes no native projection (a legacy double) is
-    treated as live, so nothing is retired that cannot be observed.
-    """
+    """Retire only a group whose context or page is observably closed."""
     context_handle = getattr(group, "context", None)
     if context_handle is not None and not _context_handle_live(context_handle):
         return False
@@ -1319,6 +1411,20 @@ async def _fetch_cookies(group: Any, context: BrowserContextHandle | None) -> li
     return _normalize_cookies(await _collect_cookies(group))
 
 
+def _project_vision_outcome(site: PageHandler, request: FetchRequest) -> tuple[str | None, str | None]:
+    """Return a CAPTCHA outcome only when the request enabled solving."""
+    if not request.solve_captcha:
+        return None, None
+    outcome = getattr(site, "vision_outcome", None)
+    if outcome is None:
+        return None, None
+    from prowl.browser.solvers.vision.schemas import VisionOutcome  # noqa: PLC0415 - only reached with a visual outcome
+
+    if not isinstance(outcome, VisionOutcome):
+        return None, None
+    return outcome.status, outcome.reason
+
+
 async def _fetch_site_result(
     site: PageHandler,
     group: TabGroup,
@@ -1354,6 +1460,7 @@ async def _fetch_site_result(
         )
 
     cookies = await _fetch_cookies(group, context)
+    vision_status, vision_reason = _project_vision_outcome(site, request)
     return FetchResult(
         url=source.url or request.url,
         status_code=source.status_code if isinstance(source.status_code, int) else None,
@@ -1364,6 +1471,8 @@ async def _fetch_site_result(
         screenshot=source.screenshot if request.return_screenshot else None,
         captcha_provider=source.captcha_provider if request.solve_captcha else None,
         captcha_token=source.captcha_token if request.solve_captcha else None,
+        vision_status=vision_status,
+        vision_reason=vision_reason,
     )
 
 

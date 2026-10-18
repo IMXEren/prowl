@@ -32,9 +32,14 @@ from prowl.shutdown import get_process_cancel_token
 from prowl.structures import CaseInsensitiveDict
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 
     from playwright.async_api import Page, Route
+
+    from prowl.browser.solvers.vision.schemas import CaptchaAttemptResult, VisionOutcome
+
+    #: Async callback that runs the backend-wired vision CAPTCHA adapter on the selected page.
+    type VisionCaptchaSolver = Callable[[Page, Callable[[], float], frozenset[str]], Awaitable[CaptchaAttemptResult]]
 
 
 def _add_doctype_header(html: str) -> str:
@@ -115,6 +120,8 @@ class PageHandler:
         self._loaded = asyncio.Event()
         self.challenge_solver: ChallengeSolver = CloudflareSolver()
         self._active_solver: tuple[ChallengeSolver, Tab] | None = None
+        # Optional backend-wired provider adapters survive ``_reset``.
+        self.vision_captcha_solvers: dict[str, VisionCaptchaSolver] = {}
         self._reset()
 
     def _reset(self: Self) -> None:
@@ -132,6 +139,7 @@ class PageHandler:
         self._on_request_callback_id: int | None = None
         self._header_route_matcher: Any = None
         self._header_route_handler: Any = None
+        self.vision_outcome: VisionOutcome | None = None
         self._loaded.clear()
         self.cleanup_done: bool = False
 
@@ -190,7 +198,11 @@ class PageHandler:
             captcha_token: str | None = None
             if solve_captcha:
                 page = self._tg.ppage
-                solved = await solve_visible_captcha(page, self.get_time_left, turnstile_solver=self.verify_turnstile)
+                solved = await solve_visible_captcha(
+                    page,
+                    self.get_time_left,
+                    provider_attempts=self._provider_attempts(page),
+                )
                 page_url = page.url
                 if solved is not None:
                     captcha_provider, captcha_token = solved
@@ -306,6 +318,42 @@ class PageHandler:
             token = await _wait_turnstile_token(page, initial, max(1, round(self.get_time_left() * 1000)))
             return True, token
         return False, None
+
+    def _vision_captcha_attempt(
+        self: Self,
+        page: "Page",
+        provider: str,
+    ) -> "Callable[[frozenset[str]], Awaitable[str | None]] | None":
+        """Bind an optional provider vision solver to *page*, retaining its outcome.
+
+        Returns ``None`` when no vision solver was wired, so the selected page keeps its
+        ordinary provider behavior. The bound wrapper
+        records every attempt's outcome on this handler and returns a token only for the
+        adapter's fixed ``handled``/``page_accepted`` success.
+        """
+        solver = self.vision_captcha_solvers.get(provider)
+        if solver is None:
+            return None
+        from prowl.browser.solvers.vision.schemas import PAGE_ACCEPTED_REASON  # noqa: PLC0415 - enabled-only
+
+        async def solve(initial: frozenset[str]) -> str | None:
+            result = await solver(page, self.get_time_left, initial)
+            self.vision_outcome = result.outcome
+            if result.outcome.status == "handled" and result.outcome.reason == PAGE_ACCEPTED_REASON:
+                return result.token or None
+            return None
+
+        return solve
+
+    def _provider_attempts(self: Self, page: "Page") -> dict[str, "Callable[[frozenset[str]], Awaitable[str | None]]"]:
+        """Bind only the provider attempts available on this selected page."""
+        attempts: dict[str, Callable[[frozenset[str]], Awaitable[str | None]]] = {
+            "turnstile": lambda _initial: self.verify_turnstile(),
+        }
+        for provider in self.vision_captcha_solvers:
+            if (vision := self._vision_captcha_attempt(page, provider)) is not None:
+                attempts[provider] = vision
+        return attempts
 
     async def verify_turnstile(self: Self) -> str | None:
         """Verify a fresh Turnstile token within the request deadline."""
