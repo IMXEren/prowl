@@ -1,11 +1,4 @@
-"""Resource-bound tests for the logical session registry.
-
-These cover the Phase 3 admission policy: when an isolated per-egress budget is
-configured, a full registry evicts the oldest idle session through the existing
-cleanup fence instead of failing, never an active or queued one, and only once its
-callback completes. Without a configured budget the legacy no-eviction rejection
-stands. Every case is deterministic and uses no browser.
-"""
+"""Isolated-session admission, eviction and capacity tests."""
 
 from __future__ import annotations
 

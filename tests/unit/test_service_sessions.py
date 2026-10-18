@@ -1,10 +1,4 @@
-"""Lifecycle tests for the logical session registry.
-
-These cover the Phase 1 session contract: mode and egress binding, TTL
-preservation, lease metadata from the admitted generation, and the destroy,
-expiry, cancellation, and shutdown fencing that keeps an id unavailable until
-its backend cleanup finishes. Every case is deterministic and uses no browser.
-"""
+"""Logical session binding, TTL and cleanup-fencing tests."""
 
 from __future__ import annotations
 

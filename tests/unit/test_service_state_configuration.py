@@ -132,7 +132,7 @@ class ServicePersistenceCleanupTests(IsolatedAsyncioTestCase):
 
 
 class ServiceDisabledCleanupTests(IsolatedAsyncioTestCase):
-    """Without persistence the reviewed positional close contracts are preserved unchanged."""
+    """Without persistence, close keeps its positional argument contract."""
 
     async def test_a_disabled_concrete_backend_keeps_the_positional_and_evicted_contracts(self) -> None:
         """Boundary: a disabled concrete backend sees the id alone, plus the eviction flag."""

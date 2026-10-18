@@ -42,8 +42,7 @@ def _child_main(connection: Any, prior_kind: str, *, second_signal_case: bool) -
     coordinator.install()
 
     if second_signal_case:
-        # Blocking callback keeps drain active so a second signal
-        # arrives during the draining phase (exercising the idempotent path).
+        # Keep the drain active until the second signal tests idempotence.
         blocker = threading.Event()
 
         def blocking_callback() -> None:

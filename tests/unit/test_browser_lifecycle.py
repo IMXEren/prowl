@@ -1,14 +1,4 @@
-"""Regression tests for Browser lifecycle ownership and cleanup.
-
-Coverage:
-  - AC1: Two concurrent shutdown callers share one cleanup; clients close once.
-  - AC2: Failed startup rolls back acquired resources before propagating.
-  - AC3: Successful startup registers handlers only after all startup work.
-  - AC4: Sync usage closes live clients before owner-loop closure.
-  - AC5: Graceful shutdown closes clients before packing.
-  - AC6: Atexit synchronous profile preservation only; creates no event loop.
-  - AC7: Lifecycle owns all state; Browser is narrow compatibility projection.
-"""
+"""Browser lifecycle ownership and cleanup regressions."""
 
 from __future__ import annotations
 

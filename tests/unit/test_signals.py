@@ -1,9 +1,4 @@
-"""Tests for src/signals.py -- one-shot process-wide graceful signal coordinator.
-
-Tests cover the current API surface: SignalCoordinator, RegistrationToken,
-CancellationToken, LIFO drain, per-registration timeout, and one-shot
-install/uninstall lifecycle.
-"""
+"""Process-wide signal coordinator lifecycle and cancellation tests."""
 
 # The tests drive the worker lifecycle before accessing its optional thread handle.
 # pyright: reportOptionalMemberAccess=false
@@ -28,20 +23,15 @@ import prowl.shutdown as process_signals
 
 
 def _noop() -> None:
-    """Trivial sync callback."""
+    pass
 
 
 async def _async_noop() -> None:
-    """Trivial async callback."""
+    pass
 
 
 def _register_hold(coord: process_signals.SignalCoordinator) -> threading.Event:
-    """Block drain worker from completing until the returned event is set.
-
-    The blocker is registered LAST so it runs FIRST in LIFO drain order,
-    keeping the worker alive and letting the caller inspect intermediate
-    state (phase, frozen identifiers, etc.).
-    """
+    """Hold the LIFO drain while tests inspect coordinator state."""
     hold = threading.Event()
 
     def wait() -> None:
@@ -123,12 +113,12 @@ class TestSignalCoordinatorConstructor:
 
 
 # ---------------------------------------------------------------------------
-# RegistrationToken                                                        AC5
+# RegistrationToken
 # ---------------------------------------------------------------------------
 
 
 class TestRegistrationToken:
-    """AC5 -- RegistrationToken identity, equality, and properties."""
+    """Registration token identity and ownership."""
 
     def test_token_constructor(self) -> None:
         coord = process_signals.SignalCoordinator()
@@ -212,12 +202,12 @@ class TestRegistrationToken:
 
 
 # ---------------------------------------------------------------------------
-# register                                                                 AC5
+# register
 # ---------------------------------------------------------------------------
 
 
 class TestRegister:
-    """AC5 -- register() returns RegistrationToken with correct contract."""
+    """Registration returns a token owned by this coordinator."""
 
     def test_register_sync_no_owner_loop(self) -> None:
         coord = process_signals.SignalCoordinator()
@@ -339,12 +329,12 @@ class TestRegister:
 
 
 # ---------------------------------------------------------------------------
-# unregister                                                               AC6
+# unregister
 # ---------------------------------------------------------------------------
 
 
 class TestUnregister:
-    """AC6 -- thread-safe unregister; False = idempotent success."""
+    """Unregister is thread-safe and idempotent."""
 
     def test_unregister_returns_true_for_active_token(self) -> None:
         coord = process_signals.SignalCoordinator()
@@ -441,12 +431,12 @@ class TestRegistrationActive:
 
 
 # ---------------------------------------------------------------------------
-# Phases                                                                   AC9
+# Coordinator phases
 # ---------------------------------------------------------------------------
 
 
 class TestPhases:
-    """AC9 -- phases are NEW -> ACTIVE -> DRAINING -> FINALIZING -> UNINSTALLED."""
+    """Coordinator phase transitions."""
 
     def test_enum_members_exist(self) -> None:
         for name in ("NEW", "ACTIVE", "DRAINING", "FINALIZING", "UNINSTALLED"):
@@ -478,12 +468,12 @@ class TestPhases:
 
 
 # ---------------------------------------------------------------------------
-# Active-event registration refusal                                       AC10
+# Active-event registration refusal
 # ---------------------------------------------------------------------------
 
 
 class TestActiveEventRefusal:
-    """AC10 -- registration during non-ACTIVE phases raises CoordinatorStateError."""
+    """Only the active coordinator accepts registrations."""
 
     def test_refuses_when_new(self) -> None:
         coord = process_signals.SignalCoordinator()
@@ -524,12 +514,12 @@ class TestActiveEventRefusal:
 
 
 # ---------------------------------------------------------------------------
-# _on_signal                                                               AC8
+# _on_signal
 # ---------------------------------------------------------------------------
 
 
 class TestOnSignal:
-    """AC8 -- _on_signal handles managed signals, freezes snapshot, spawns worker."""
+    """Signal handling freezes the snapshot and starts the worker."""
 
     def test_records_triggering_signal(self) -> None:
         coord = process_signals.SignalCoordinator()
@@ -884,12 +874,12 @@ class TestCancellationToken:
 
 
 # ---------------------------------------------------------------------------
-# install / uninstall (one-shot)                                   AC15-AC17
+# Signal handler installation
 # ---------------------------------------------------------------------------
 
 
 class TestInstallUninstall:
-    """AC15-AC17 -- main-thread-only, idempotent install, one-shot enforcement."""
+    """Installation is main-thread-only and one-shot."""
 
     def test_install_idempotent(self) -> None:
         coord = process_signals.SignalCoordinator()
@@ -975,7 +965,7 @@ class TestInstallUninstall:
             coord.uninstall()
 
     def test_partial_install_failure_rolls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """AC16 -- second managed signal installation raises; rollback restores first."""
+        """A failed second signal install restores the first handler."""
         coord = process_signals.SignalCoordinator()
         prior_int: object = signal.getsignal(signal.SIGINT)
         prior_term: object = signal.getsignal(signal.SIGTERM)
