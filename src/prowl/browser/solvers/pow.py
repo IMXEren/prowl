@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from playwright.async_api import Locator, Page
 
 _POLL_INTERVAL_SECONDS: float = 0.25
+_FRIENDLY_READY_SECONDS: float = 12.0
 
 _ALTCHA_START_JS = """() => {
   const widget = document.querySelector('altcha-widget');
@@ -146,7 +147,7 @@ async def _friendly_frame_button(page: Page) -> Locator | None:
     for frame in page.frames:
         url = urlsplit(frame.url)
         host = url.hostname or ""
-        if not host.endswith(".frcapi.com") or url.path != "/api/v2/captcha/widget":
+        if not host.endswith(".frcapi.com") or url.path not in {"/api/v2/captcha/widget", "/api/v2/captcha/agent"}:
             continue
         element = await frame.frame_element()
         if element is None or not await element.is_visible():
@@ -196,7 +197,7 @@ async def _solve(page: Page, seconds_remaining: Callable[[], float], widget: _Po
             if len(mounts) != 1:
                 return None
             initial = _parse_snapshot(await page.evaluate(widget.snapshot_js)).values
-            ready_deadline = min(deadline, time.monotonic() + 3.0)
+            ready_deadline = min(deadline, time.monotonic() + (_FRIENDLY_READY_SECONDS if widget is _FRIENDLY else 3.0))
             while True:
                 started = await page.evaluate(widget.start_js)
                 if started is True or await _click_target(page, widget):

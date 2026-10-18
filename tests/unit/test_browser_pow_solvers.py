@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import time
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from playwright.async_api import Frame, Locator, Page
 
+from prowl.browser.solvers import pow as pow_solver
 from prowl.browser.solvers.pow import solve_altcha, solve_friendly_captcha
 
 _FRIENDLY_TOKEN = "frc-token-0123456789abcdefghijklmnopq"  # noqa: S105
@@ -102,23 +103,68 @@ class TriggerPathTests(IsolatedAsyncioTestCase):
         locator.click.assert_not_awaited()
 
     async def test_friendly_v2_clicks_only_its_unique_visible_frame_button(self) -> None:
+        for path in ("widget", "agent"):
+            with self.subTest(path=path):
+                in_page = _locator(count=0)
+                button = _locator()
+                frame = Mock(spec=Frame)
+                frame.url = f"https://global.frcapi.com/api/v2/captcha/{path}?ignored=1"
+                frame.frame_element = AsyncMock(return_value=_locator())
+                frame.locator = Mock(return_value=button)
+                page = _page(
+                    1,
+                    [{"state": None, "values": []}, False, {"state": None, "values": [_FRIENDLY_TOKEN]}],
+                    locator=in_page,
+                )
+                page.frames = [frame]
+                self.assertEqual(await solve_friendly_captcha(page, lambda: 5.0), _FRIENDLY_TOKEN)
+                button.click.assert_awaited_once()
+                in_page.click.assert_not_awaited()
+                frame.locator.assert_called_once_with("button.button[aria-label]")
+
+    async def test_friendly_v2_refuses_ambiguous_provider_buttons(self) -> None:
+        page = _page(1, [{"state": None, "values": []}, False], locator=_locator(count=0))
+        buttons = []
+        for path in ("widget", "agent"):
+            button = _locator()
+            frame = Mock(spec=Frame)
+            frame.url = f"https://global.frcapi.com/api/v2/captcha/{path}"
+            frame.frame_element = AsyncMock(return_value=_locator())
+            frame.locator = Mock(return_value=button)
+            page.frames.append(frame)
+            buttons.append(button)
+        self.assertIsNone(await solve_friendly_captcha(page, lambda: 0.05))
+        for button in buttons:
+            button.click.assert_not_awaited()
+
+    async def test_friendly_v2_waits_for_provider_frame_after_three_seconds(self) -> None:
         in_page = _locator(count=0)
         button = _locator()
         frame = Mock(spec=Frame)
-        frame.url = "https://global.frcapi.com/api/v2/captcha/widget?ignored=1"
-        element = _locator()
-        frame.frame_element = AsyncMock(return_value=element)
+        frame.url = "https://global.frcapi.com/api/v2/captcha/widget"
+        frame.frame_element = AsyncMock(return_value=_locator())
         frame.locator = Mock(return_value=button)
         page = _page(
             1,
-            [{"state": None, "values": []}, False, {"state": None, "values": [_FRIENDLY_TOKEN]}],
+            [{"state": None, "values": []}, *([False] * 30), {"state": "completed", "values": [_FRIENDLY_TOKEN]}],
             locator=in_page,
         )
-        page.frames = [frame]
-        self.assertEqual(await solve_friendly_captcha(page, lambda: 5.0), _FRIENDLY_TOKEN)
+        clock = [0.0]
+        original_sleep = asyncio.sleep
+
+        async def advance(delay: float) -> None:
+            clock[0] += delay
+            if clock[0] >= 3.25:
+                page.frames = [frame]
+            await original_sleep(0)
+
+        with (
+            patch.object(pow_solver.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(pow_solver.asyncio, "sleep", side_effect=advance),
+        ):
+            self.assertEqual(await solve_friendly_captcha(page, lambda: 20.0), _FRIENDLY_TOKEN)
+        self.assertGreaterEqual(clock[0], 3.25)
         button.click.assert_awaited_once()
-        in_page.click.assert_not_awaited()
-        frame.locator.assert_called_once_with("button.button[aria-label]")
 
     async def test_friendly_v2_refuses_lookalike_frame(self) -> None:
         in_page = _locator(count=0)
