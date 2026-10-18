@@ -12,7 +12,7 @@ One repository owns the whole stack:
 
 ```
 src/prowl/
-  browser/            reusable core (extracted code, behaviour preserved)
+  browser/            browser identity, tabs, and challenge handling
     browser.py        Browser process manager + TabGroup
     page_handler.py   PageHandler/PageResponse, challenge handling, DOM tree building, POST fetch
     cookies.py        cookie persistence helpers
@@ -24,12 +24,7 @@ src/prowl/
   cli.py              `prowl fetch` / `prowl serve`
 ```
 
-The core is production browser code. It keeps its tested dual Playwright +
-pydoll/CloakBrowser behaviour, persistent profile warming and packing, cookie handling,
-supported challenge handling, and cancellation/cleanup semantics. The service layer adds
-environment-driven configuration, explicitly scoped custom request headers, and a real
-browser `POST` path, and the generic signal coordinator moved from `src/signals.py` into
-`prowl.shutdown`, keeping the package self-contained.
+The browser core uses Playwright and PyDoll/CloakBrowser for rendering and input, with persistent profiles and request-scoped cleanup. The service adds configuration, request routing, and the HTTP API.
 
 ## Profiles are persistent trust assets
 
@@ -150,7 +145,7 @@ serves one request and closes; intercepted requests cannot escape the CONNECT au
 
 ## Egress / proxy
 
-One browser and one profile have exactly one egress. `PROWL_PROXY_URL` configures the
+Each browser identity has its own profile and egress. `PROWL_PROXY_URL` configures the
 process-wide egress, named `default`. Unauthenticated URLs become Chromium proxy
 arguments; authenticated HTTP(S) upstreams use a private loopback bridge, so Chromium
 receives only a credential-free local proxy argument.
@@ -347,7 +342,7 @@ of the named `tab`, so a client displaying a tab protects it from takeover. This
 idle timeout or an explicit `browser.close`.
 
 ```json
-{ "cmd": "browser.open", "url": "https://example.com/", "proxy": { "name": "decodo" } }
+{ "cmd": "browser.open", "url": "https://example.com/", "proxy": { "name": "work" } }
 ```
 
 ```json
@@ -459,23 +454,17 @@ subdirectory holding a `manifest.json` is loaded with `--load-extension` and
 manifest, or with one that will not parse, is skipped with a warning rather than failing the
 launch. An absent or empty directory launches exactly as it did before the option existed.
 
-Two things are worth stating plainly. A modern Chromium no longer runs Manifest V2 extensions,
-so an ad blocker has to be a Manifest V3 build: uBlock Origin Lite rather than the original
-uBlock Origin. And an extension runs inside the pages it applies to, so it is visible to them
-and is one more thing that distinguishes this browser from a stock one, which matters for a
-browser whose value is passing bot checks.
+Use Manifest V3 extensions. Page-accessing extensions are visible to sites and can affect
+browser identity.
 
 `PROWL_POLICY_DIR` points at a directory of managed policy JSON files. Chromium reads managed
 policy from a system directory whose path depends on how the build is branded: a Chromium build
 reads `/etc/chromium/policies/managed` and a Chrome-branded build reads
-`/etc/opt/chrome/policies/managed`. A build cannot be asked which it is, so Prowl writes every
-policy file into each of those directories that it can, and a file under a path the build does
-not read is inert. When the container runs unprivileged it cannot create them, and the operator
-mounts the policy directory at one of those paths instead; Prowl says which directories it could
-not write.
+`/etc/opt/chrome/policies/managed`. Prowl writes policy files into both directories where
+permitted; only the path read by the browser applies. An unprivileged container must mount the
+policy directory at the appropriate path.
 
-Policies set what policies can set. For an unpacked extension that is who may run it, which
-hosts it may reach, and whether it is pinned to the toolbar, through `ExtensionSettings`:
+For unpacked extensions, `ExtensionSettings` controls permitted hosts and toolbar pinning:
 
 ```json
 {
@@ -489,15 +478,7 @@ hosts it may reach, and whether it is pinned to the toolbar, through `ExtensionS
 }
 ```
 
-What policy does **not** cover is a permission a user normally grants by clicking, such as
-uBlock Origin Lite's "Allow User Scripts". That value lives in the profile rather than in policy,
-and Prowl does not seed it: the mechanism is a profile key the extension system owns
-(`extensions.settings.<id>.granted_permissions`), the id of an unpacked extension is derived from
-its path, and no browser launch was available to prove that writing it has the intended effect.
-Rather than ship a guess, the option is left out and the limit is documented here. What does work
-is that a click is a one-time cost: Prowl owns its profile and packs it on shutdown, so a toggle
-granted once inside the browser survives every restart, so a deployment that needs a preset
-toggle should treat the click as the supported path for now.
+Prowl does not pre-grant permissions that require a user click in the browser. Grant them there; the persistent profile retains them across restarts.
 
 ## Releases
 
