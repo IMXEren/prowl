@@ -16,7 +16,7 @@ dependencies = [
     "curl_cffi==0.16.3",
     "pydoll-python @ git+https://github.com/IMXEren/pydoll.git@2.24.1",
     "turbohtml==1.15.1",
-    "pycryptodome==4.0.0",
+    "pycryptodome==4.0.1",
     "aiohttp==3.13.5",
     "h11==0.16.0",
     "cryptography==50.0.2",
