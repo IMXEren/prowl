@@ -33,7 +33,7 @@ dev = [
     "build>=1.2",
 ]
 vision = [
-    "Pillow==12.3.0",
+    "Pillow==13.0.0",
 ]
 
 [project.scripts]
