@@ -1,3 +1,20 @@
+## [2.0.0-dev.6](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.5...v2.0.0-dev.6) (2026-10-18)
+
+### Bug Fixes
+
+* **captcha:** recognize Friendly Captcha agent frames ([4986750](https://github.com/IMXEren/prowl/commit/4986750372d881b20db9fa74468ba7f2fbb0332b))
+
+### New Features
+
+* **captcha:** add opt-in visual challenge adapters ([8caace8](https://github.com/IMXEren/prowl/commit/8caace85b2da846c7aba35b59b5d6d534650eab5))
+
+### Dependencies
+
+* **deps:** bump Pillow to 13.0.0 ([e947492](https://github.com/IMXEren/prowl/commit/e947492c8e4ba047b513f81c5e8c9716d73caa56))
+* **deps:** bump pycryptodome to 4.0.1 ([9afc7a3](https://github.com/IMXEren/prowl/commit/9afc7a3f2d020d17eca2a0316945f8e6a1f351c5))
+* **deps:** bump ruff to 0.17.1 ([6291344](https://github.com/IMXEren/prowl/commit/62913448d0fb38fa4ef4ae0d9da3b24edf745d00))
+* **deps:** bump turbohtml to 1.15.2 ([8f6d80d](https://github.com/IMXEren/prowl/commit/8f6d80de6c373a4fb4722dae1169cbb43dface2a))
+
 ## [2.0.0-dev.5](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.4...v2.0.0-dev.5) (2026-10-14)
 
 ### Dependencies
