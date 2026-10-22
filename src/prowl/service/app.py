@@ -68,6 +68,7 @@ from prowl.service.backend import (
     FetchResult,
     InteractiveRequest,
 )
+from prowl.service.cdp import register_cdp
 from prowl.service.context_state import ContextStateStore
 from prowl.service.errors import CallerSafeError, ProxyError
 
@@ -271,6 +272,7 @@ class ServiceConfig:
     #: together and only alongside an enabled listener.
     proxy_ca_cert: str | None = None
     proxy_ca_key: str | None = None
+    cdp_token: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Reject an unusable context cap or forward proxy configuration before native work.
@@ -361,6 +363,11 @@ class ServiceConfig:
             forward_proxy_port=_forward_proxy_port(),
             proxy_ca_cert=os.environ.get(PROXY_CA_CERT_ENV, "").strip() or None,
             proxy_ca_key=os.environ.get(PROXY_CA_KEY_ENV, "").strip() or None,
+            cdp_token=(
+                Path(os.environ["PROWL_CDP_TOKEN_FILE"]).read_text(encoding="utf-8").strip()
+                if os.environ.get("PROWL_CDP_TOKEN_FILE")
+                else None
+            ),
             vision_enabled=vision_enabled,
             vision_vlm_enabled=vision_vlm_enabled,
             vision_vlm_endpoint=vision_vlm_endpoint,
@@ -932,6 +939,8 @@ def create_app(config: ServiceConfig, backend: Backend) -> web.Application:
     app.router.add_get("/healthz", _handle_healthz)
     app.router.add_get("/readyz", _handle_readyz)
     app.router.add_get("/metrics", _handle_metrics)
+    if config.cdp_token is not None and isinstance(backend, BrowserBackend):
+        register_cdp(app, backend, config.cdp_token)
     app.on_startup.append(_on_startup)
     app.on_cleanup.append(_on_cleanup)
     return app
