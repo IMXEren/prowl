@@ -130,7 +130,7 @@ jobs:
           name: release-image
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build and smoke-test the native candidate
         env:
@@ -168,7 +168,7 @@ jobs:
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Publish multi-platform tags and retain releases
         env:
