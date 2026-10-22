@@ -10,7 +10,10 @@
     [
       "@semantic-release/commit-analyzer",
       {
+        "preset": "conventionalcommits",
         "releaseRules": [
+          { "breaking": true, "release": "major" },
+          { "type": "build", "scope": "deps", "release": "patch" },
           { "type": "fix", "release": "patch" },
           { "type": "feat", "release": "minor" },
           { "type": "perf", "release": "patch" },
@@ -28,6 +31,7 @@
             { "type": "feat", "section": "New Features", "hidden": false },
             { "type": "perf", "section": "Performance Improvements", "hidden": false },
             { "type": "refactor", "section": "Refactoring", "hidden": false },
+            { "type": "build", "scope": "deps", "section": "Dependencies", "hidden": false },
             { "type": "build", "hidden": true },
             { "type": "chore", "hidden": true },
             { "type": "ci", "hidden": true },
@@ -75,7 +79,7 @@
     [
       "@semantic-release/exec",
       {
-        "publishCmd": "bash .github/scripts/publish-image.sh ${nextRelease.version}"
+        "publishCmd": "bash .github/scripts/prepare-image.sh ${nextRelease.version}"
       }
     ],
     [

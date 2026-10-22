@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -13,7 +14,14 @@ from playwright.async_api import async_playwright
 from pydoll.browser import Chrome
 from pydoll.browser.tab import Tab as PDTab
 
-from prowl.browser.exceptions import BrowserError, BrowserStartError, BrowserTabError
+from prowl.browser.driver.contexts import (
+    BrowserContextHandle,
+    BrowserContextManager,
+    apply_human_patch,
+    persona_context_options,
+    require_session_id,
+)
+from prowl.browser.exceptions import BrowserContextError, BrowserError, BrowserStartError, BrowserTabError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -21,10 +29,13 @@ if TYPE_CHECKING:
     from playwright.async_api import Browser as PWBrowser
     from playwright.async_api import BrowserContext as PWBrowserCtx
     from playwright.async_api import Page as PWPage
-    from playwright.async_api import Playwright
+    from playwright.async_api import Playwright, StorageState
     from pydoll.browser.options import ChromiumOptions
 
     from prowl.browser.browser import TabGroup
+
+    #: Handler a context calls for an involuntary popup page.
+    PopupHandler = Callable[[PWPage], Coroutine[None, None, None] | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +96,11 @@ class BrowserRuntimeState:
     cdp_playwright: Playwright | None = None
     cdp_browser: PWBrowser | None = None
     main_ctx_owned: bool = False
+    contexts: BrowserContextManager = field(default_factory=BrowserContextManager)
+    popup_handler: PopupHandler | None = None
+    #: Whether the running browser was launched with CloakBrowser humanization, so
+    #: contexts created beside its persistent one get the same patch.
+    humanize_contexts: bool = False
 
     def __post_init__(self) -> None:
         """Initialize semaphore after max_groups is available."""
@@ -110,6 +126,9 @@ class BrowserRuntimeState:
         self.main_ctx = cast("PWBrowserCtx", self.main_ctx)
         self.main_ctx_owned = True
         self.main_ctx.on("page", config.popup_handler)
+        self.popup_handler = config.popup_handler
+        self.humanize_contexts = config.humanize
+        self.contexts.bind_shared(self.main_ctx)
         await asyncio.sleep(0.5)
 
         ws_url = await resolve_cdp_ws_url(config.cdp_port)
@@ -144,6 +163,10 @@ class BrowserRuntimeState:
                 self.main_ctx = cast("PWBrowserCtx", config.main_ctx)
                 self.main_ctx_owned = False
             self.main_ctx.on("page", config.popup_handler)
+            self.popup_handler = config.popup_handler
+            # A remote browser is not ours to humanize: its launch settings are unknown,
+            # so contexts created here keep whatever behavior it already runs.
+            self.contexts.bind_shared(self.main_ctx)
 
             main_tab = await self.shared_pd.connect(config.ws_url)
             page_owned = self.main_ctx_owned
@@ -171,35 +194,31 @@ class BrowserRuntimeState:
             raise BrowserStartError(msg) from e
 
     async def rollback_start(self) -> None:
-        """Close partially acquired driver resources and clear live maps."""
+        """Retire the local generation so a fresh one can be launched cleanly.
+
+        Registered groups and pages give their admission slots back exactly once, before the
+        browser they run in is closed, then the isolated contexts and the native projections
+        are retired. Failed native closes retain unfinished ownership for a subsequent retry.
+        """
+        await self.close_all_groups_and_pages()
+        await self.close_isolated_contexts()
         if self.shared_pd is not None:
-            try:
-                await self.shared_pd.close()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to close PyDoll during startup rollback")
+            await self.shared_pd.close()
             self.shared_pd = None
         if self.main_ctx is not None and self.main_ctx_owned:
-            try:
-                await self.main_ctx.close()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to close Playwright context during startup rollback")
+            await self.main_ctx.close()
         self.main_ctx = None
-        self.main_ctx_owned = False
         if self.cdp_browser is not None:
-            try:
-                await self.cdp_browser.close()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to close Playwright CDP browser during startup rollback")
+            await self.cdp_browser.close()
             self.cdp_browser = None
         if self.cdp_playwright is not None:
-            try:
-                await self.cdp_playwright.stop()
-            except BaseException:  # noqa: BLE001
-                logger.error("Failed to stop Playwright during startup rollback")
+            await self.cdp_playwright.stop()
             self.cdp_playwright = None
+        self.main_ctx_owned = False
         self.target_to_page_map.clear()
         self.target_page_owned.clear()
         self.page_to_group.clear()
+        self.contexts.reset()
 
     def allocate_group_id(self) -> int:
         """Return the next concrete group id and advance the sequence."""
@@ -215,8 +234,19 @@ class BrowserRuntimeState:
         return self.main_ctx
 
     def is_running(self) -> bool:
-        """Return whether concrete runtime clients are live."""
-        return self.main_ctx is not None and not self.main_ctx.is_closed() and self.shared_pd is not None
+        """Return whether concrete runtime clients are live.
+
+        A Playwright context can keep reporting itself open after the browser process behind
+        it has gone away, so the native connection is consulted too when the projection
+        exposes one.
+        """
+        if self.main_ctx is None or self.shared_pd is None:
+            return False
+        if self.main_ctx.is_closed():
+            return False
+        browser = self.main_ctx.browser
+        is_connected = getattr(browser, "is_connected", None)
+        return not (callable(is_connected) and not is_connected())
 
     def get_pw_browser(self) -> PWBrowser:
         """Return the shared Playwright browser projection."""
@@ -238,6 +268,124 @@ class BrowserRuntimeState:
             raise BrowserError(msg)
         return self.shared_pd
 
+    # -- Owned browser contexts ------------------------------------------------------
+
+    def shared_context(self) -> BrowserContextHandle:
+        """Return the handle wrapping the shared persistent context.
+
+        The handle is bound on first use, so a runtime whose main context was installed
+        directly still resolves one identity, and a restarted browser replaces a handle
+        that pointed at the previous context.
+        """
+        handle = self.contexts.shared()
+        if handle is not None and handle.context is self.main_ctx:
+            return handle
+        return self.contexts.bind_shared(self._require_main_ctx())
+
+    def resolve_context(self, context: BrowserContextHandle | None) -> BrowserContextHandle:
+        """Return the context handle a request group should use.
+
+        ``None`` selects the shared persistent context.
+
+        :raises BrowserContextError: for a handle owned by another browser identity or
+            whose context has already been closed.
+        """
+        if context is None:
+            return self.shared_context()
+        self.contexts.require_own(context)
+        if context.context.is_closed():
+            msg = f"The browser context for session {context.session_id!r} is closed."
+            raise BrowserContextError(msg)
+        return context
+
+    async def isolated_context(
+        self,
+        session_id: str,
+        *,
+        storage_state: StorageState | None = None,
+    ) -> BrowserContextHandle:
+        """Return the isolated context for *session_id*, creating it on first use.
+
+        The context lives in the running browser process, so it keeps the identity's
+        proxy, fingerprint, locale and timezone while holding its own cookies and storage.
+        *storage_state* seeds a newly created context through the native API; an existing
+        live handle wins and ignores it, because the factory only runs on first creation.
+
+        :raises BrowserContextError: for a session id that cannot name a context.
+        """
+        require_session_id(session_id)
+        if storage_state is None:
+            return await self.contexts.get_or_create(session_id, lambda: self._open_isolated_context(session_id))
+        return await self.contexts.get_or_create(
+            session_id,
+            lambda: self._open_isolated_context(session_id, storage_state=storage_state),
+        )
+
+    async def _open_isolated_context(
+        self,
+        session_id: str,
+        *,
+        storage_state: StorageState | None = None,
+    ) -> PWBrowserCtx:
+        """Create one isolated context beside the persistent one in this browser.
+
+        *storage_state* is handed to the native ``new_context`` unchanged, so cookies,
+        localStorage and IndexedDB are restored by Playwright itself.
+        """
+        main_ctx = self._require_main_ctx()
+        browser = main_ctx.browser
+        if browser is None:
+            msg = "Playwright browser disconnected."
+            raise BrowserError(msg)
+        options = persona_context_options(main_ctx)
+        if storage_state is None:
+            context = await browser.new_context(**options)
+        else:
+            context = await browser.new_context(**options, storage_state=storage_state)
+        try:
+            if self.popup_handler is not None:
+                context.on("page", self.popup_handler)
+            if self.humanize_contexts:
+                apply_human_patch(context)
+        except BaseException:
+            await context.close()
+            raise
+        logger.debug(f"Isolated browser context created for session {session_id!r}.")
+        return context
+
+    async def close_isolated_context(self, session_id: str, *, evicted: bool = False) -> None:
+        """Close the isolated context for *session_id* and the groups that live in it.
+
+        Idempotent: an unknown session is a no-op. The shared persistent context is never
+        closed here. *evicted* says automatic cleanup, not an explicit caller, is retiring the
+        context, and is forwarded to the manager's eviction counter.
+        """
+        require_session_id(session_id)
+        handle = self.contexts.isolated(session_id)
+        if handle is None:
+            return
+        await self._close_groups_in_context(handle)
+        if evicted:
+            await self.contexts.close_isolated(session_id, evicted=True)
+        else:
+            await self.contexts.close_isolated(session_id)
+        for target_id, page in list(self.target_to_page_map.items()):
+            if page.context is handle.context:
+                self._forget_target(target_id, page)
+
+    async def close_isolated_contexts(self) -> None:
+        """Close every isolated context this runtime owns and their request groups."""
+        for handle in self.contexts.isolated_handles():
+            if handle.session_id is not None:
+                await self.close_isolated_context(handle.session_id)
+
+    async def _close_groups_in_context(self, handle: BrowserContextHandle) -> None:
+        """Close every request group whose pages live in *handle*."""
+        async with self.spawn_lock:
+            groups = [group for group in self.active_groups if group.context is handle]
+        if groups:
+            await asyncio.gather(*(self.close_group(group) for group in groups), return_exceptions=True)
+
     def attach_page_to_group(self, page: PWPage, group: TabGroup) -> None:
         """Associate a concrete Playwright page projection with a tab group."""
         self.page_to_group[page] = group
@@ -247,29 +395,60 @@ class BrowserRuntimeState:
         group_factory: Callable[[str, int], TabGroup],
         ensure_running: Callable[[], Awaitable[None]],
         is_running: Callable[[], bool],
+        context: BrowserContextHandle | None = None,
     ) -> TabGroup:
-        """Own group semaphore admission and create a group after startup if needed."""
-        await self.group_semaphore.acquire()
+        """Own group semaphore admission and create a group after startup if needed.
 
+        The admission slot is returned exactly once on every path, including cancellation
+        while the browser starts or the parent page is created, and a group that was
+        registered but never handed to the caller has its slot returned here.
+        """
+        if context is not None:
+            self.contexts.require_own(context)
+        await self.group_semaphore.acquire()
+        registered: list[TabGroup] = []
         try:
             if not is_running():
                 await ensure_running()
             if not is_running():
                 msg = "Failed to start from already running: Master browser process is not active."
                 raise BrowserError(msg)
-            return await self.create_group(group_factory)
-        except Exception:
-            self.group_semaphore.release()
+            return await self.create_group(group_factory, context, registered)
+        except BaseException:
+            for group in registered:
+                try:
+                    await self.close_group(group)
+                finally:
+                    self._release_group_slot(group)
+            if not registered:
+                self.group_semaphore.release()
             raise
 
-    def _add_tab_to_pd(self, target_id: str) -> PDTab:
-        """Add a PyDoll tab entry for *target_id* and return it."""
+    def _release_group_slot(self, group: TabGroup) -> None:
+        """Return a registered group's admission slot exactly once, without awaiting.
+
+        Releasing without awaiting is what keeps a cancelled close from leaking the slot.
+        """
+        if group in self.active_groups:
+            self.active_groups.discard(group)
+            self.group_semaphore.release()
+
+    def _forget_target(self, target_id: str, page: PWPage | None = None) -> None:
+        """Drop the runtime bookkeeping for a target without awaiting."""
+        self._remove_tab_from_pd(target_id)
+        self.target_to_page_map.pop(target_id, None)
+        self.target_page_owned.pop(target_id, None)
+        if page is not None:
+            self.page_to_group.pop(page, None)
+
+    def _add_tab_to_pd(self, target_id: str, browser_context_id: str | None = None) -> PDTab:
+        """Add a PyDoll tab entry for *target_id* in its browser context and return it."""
         if self.shared_pd is None:
             msg = "Browser is not running - call Browser.start() first."
             raise BrowserError(msg)
         tab = PDTab(
             self.shared_pd,
-            **self.shared_pd._get_tab_kwargs(target_id, browser_context_id=None),  # noqa: SLF001
+            **self.shared_pd._get_tab_kwargs(target_id, browser_context_id=browser_context_id),  # noqa: SLF001
         )
         self.shared_pd._tabs_opened[target_id] = tab  # noqa: SLF001
         return tab
@@ -280,38 +459,76 @@ class BrowserRuntimeState:
             return
         self.shared_pd._tabs_opened.pop(target_id, None)  # noqa: SLF001
 
-    async def create_page(self) -> tuple[str, PWPage]:
-        """Create a concrete Playwright page and track its target id."""
-        main_ctx = self._require_main_ctx()
+    async def create_page(self, context: BrowserContextHandle | None = None) -> tuple[str, PWPage]:
+        """Create a concrete Playwright page in *context* and track its target id.
+
+        The CDP target's browser context id is kept on the PyDoll tab, so storage and
+        cookie operations made through that tab reach the context the page really lives in.
+        """
+        handle = self.resolve_context(context)
         async with self.spawn_lock:
-            page = await main_ctx.new_page()
-            cdp = await main_ctx.new_cdp_session(page)
-            result = await cdp.send("Target.getTargetInfo")
-            await cdp.detach()
-            target_id = result["targetInfo"]["targetId"]
-            self._add_tab_to_pd(target_id)
-            self.target_to_page_map[target_id] = page
-            self.target_page_owned[target_id] = True
+            self.contexts.require_own(handle)
+            page = await handle.context.new_page()
+            try:
+                cdp = await handle.context.new_cdp_session(page)
+                try:
+                    result = await cdp.send("Target.getTargetInfo")
+                finally:
+                    await cdp.detach()
+                info = result["targetInfo"]
+                target_id = info["targetId"]
+                self._add_tab_to_pd(target_id, info.get("browserContextId"))
+                self.target_to_page_map[target_id] = page
+                self.target_page_owned[target_id] = True
+            except BaseException:
+                await page.close()
+                raise
         return (target_id, page)
 
-    async def create_group(self, group_factory: Callable[[str, int], TabGroup]) -> TabGroup:
-        """Create and register a concrete tab group from a new parent page."""
-        target_id, page = await self.create_page()
-        group = group_factory(target_id, self.allocate_group_id())
+    async def create_group(
+        self,
+        group_factory: Callable[[str, int], TabGroup],
+        context: BrowserContextHandle | None = None,
+        registered: list[TabGroup] | None = None,
+    ) -> TabGroup:
+        """Create and register a concrete tab group from a new parent page.
+
+        *registered* receives the group as soon as it owns an admission slot, so a caller
+        cancelled between creation and hand-off can return that slot exactly once.
+        """
+        handle = self.resolve_context(context)
+        target_id, page = await self.create_page(handle)
+        try:
+            group = group_factory(target_id, self.allocate_group_id())
+            group.bind_context(handle)
+        except BaseException:
+            self._forget_target(target_id, page)
+            with contextlib.suppress(Exception):
+                await page.close()
+            raise
         self.page_to_group[page] = group
-        async with self.spawn_lock:
-            self.active_groups.add(group)
+        self.active_groups.add(group)
+        if registered is not None:
+            registered.append(group)
         return group
 
     async def get_pd_tab(self, target_id: str) -> PDTab | None:
-        """Resolve the live PyDoll tab for *target_id*, or ``None``."""
+        """Resolve the live PyDoll tab for *target_id*, or ``None``.
+
+        The tab this runtime registered for the target is authoritative: resolution from
+        the browser's target list rebuilds a tab without its browser context id, which
+        would point storage and cookie operations at the default context of a page that
+        lives in an isolated one.
+        """
         if self.shared_pd is None:
             msg = "Browser is not running - call Browser.start() first."
             raise BrowserError(msg)
-        tabs = await self.shared_pd.get_opened_tabs()
-        for tab in tabs:
-            if tab._target_id == target_id:  # noqa: SLF001
-                return tab
+        cached = self.shared_pd._tabs_opened.get(target_id)  # noqa: SLF001
+        if cached is not None:
+            return cast("PDTab", cached)
+        for target in await self.shared_pd.get_targets():
+            if target["targetId"] == target_id and target["type"] == "page":
+                return self._add_tab_to_pd(target_id, target.get("browserContextId"))
         return None
 
     def get_pw_page(self, target_id: str) -> PWPage | None:
@@ -325,7 +542,11 @@ class BrowserRuntimeState:
         await self.shared_pd.set_window_minimized()
 
     async def attach_popup_page(self, page: PWPage) -> None:
-        """Attach an involuntary popup page to its opener's tab group."""
+        """Attach an involuntary popup page to its opener's tab group.
+
+        The page's own context is used to resolve its target, so a popup opened from a page
+        in an isolated context is registered against that context.
+        """
         opener = await page.opener()
         if opener is None:
             return
@@ -333,22 +554,29 @@ class BrowserRuntimeState:
         if group is None:
             return
 
-        main_ctx = self._require_main_ctx()
         try:
-            cdp = await main_ctx.new_cdp_session(page)
-            result = await cdp.send("Target.getTargetInfo")
-            await cdp.detach()
+            cdp = await page.context.new_cdp_session(page)
+            try:
+                result = await cdp.send("Target.getTargetInfo")
+            finally:
+                await cdp.detach()
         except Exception:  # noqa: BLE001
             logger.debug("Failed to resolve target ID for popup page; discarding.")
+            await page.close()
             return
 
-        target_id = result["targetInfo"]["targetId"]
+        info = result["targetInfo"]
+        target_id = info["targetId"]
         async with self.spawn_lock:
-            self._add_tab_to_pd(target_id)
+            self._add_tab_to_pd(target_id, info.get("browserContextId"))
             self.target_to_page_map[target_id] = page
             self.target_page_owned[target_id] = True
-        self.page_to_group[page] = group
         async with group._lock:  # noqa: SLF001
+            if group._quitting:  # noqa: SLF001
+                await page.close()
+                self._forget_target(target_id, page)
+                return
+            self.page_to_group[page] = group
             group.child_target_ids.append(target_id)
         logger.debug(f"Popup tab {target_id} attached to group {group.gid}")
 
@@ -367,40 +595,38 @@ class BrowserRuntimeState:
         if target_page is not None and self.target_page_owned.get(target_id, True):
             await target_page.close()
 
-        async with self.spawn_lock:
-            self._remove_tab_from_pd(target_id)
-            self.target_to_page_map.pop(target_id, None)
-            self.target_page_owned.pop(target_id, None)
+        self._forget_target(target_id, target_page)
         async with group._lock:  # noqa: SLF001
             if target_id in group.child_target_ids:
                 group.child_target_ids.remove(target_id)
-        if target_page is not None:
-            self.page_to_group.pop(target_page, None)
 
     async def close_group(self, group: TabGroup) -> None:
         """Close all targets for a group and release its concurrency slot once."""
         if group._quitting:  # noqa: SLF001
             return
         group._quitting = True  # noqa: SLF001
+        errors: list[BaseException] = []
         try:
             async with group._lock:  # noqa: SLF001
-                child_ids = list(group.child_target_ids)
-            for child_id in child_ids:
-                await self.close_group_target(group, child_id)
-
-            parent_page = self.get_pw_page(group.target_id)
-            if parent_page is not None and self.target_page_owned.get(group.target_id, True):
-                await parent_page.close()
-            async with self.spawn_lock:
-                self._remove_tab_from_pd(group.target_id)
-                self.target_to_page_map.pop(group.target_id, None)
-                self.target_page_owned.pop(group.target_id, None)
-                if parent_page is not None:
-                    self.page_to_group.pop(parent_page, None)
+                target_ids = [*group.child_target_ids, group.target_id]
+            for target_id in target_ids:
+                page = self.get_pw_page(target_id)
+                try:
+                    if page is not None and self.target_page_owned.get(target_id, True):
+                        await page.close()
+                except asyncio.CancelledError as exc:
+                    errors.append(exc)
+                except Exception as exc:  # noqa: BLE001 - finish other pages before re-raising
+                    logger.exception("Request page cleanup failed")
+                    errors.append(exc)
+                else:
+                    self._forget_target(target_id, page)
+                    if target_id in group.child_target_ids:
+                        group.child_target_ids.remove(target_id)
         finally:
-            async with self.spawn_lock:
-                self.active_groups.discard(group)
-                self.group_semaphore.release()
+            self._release_group_slot(group)
+        if errors:
+            raise errors[0]
 
     async def close_all_groups_and_pages(self) -> None:
         """Close all registered groups and orphan pages, then clear runtime maps."""

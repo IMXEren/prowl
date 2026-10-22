@@ -8,6 +8,7 @@ node_modules/
 dist/
 build/
 .pytest_cache/
+tests/e2e-records/
 .ruff_cache/
 .mypy_cache/
 *.zip
