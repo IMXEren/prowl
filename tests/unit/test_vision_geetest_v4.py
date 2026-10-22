@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, patch
 
-from prowl.browser.solvers.vision.geetest_v4 import _asset_url, _attempt, _layout, _validation
+from prowl.browser.solvers.vision.geetest_v4 import _asset_url, _attempt, _layout, _read_layout, _validation
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,6 +66,28 @@ class GeeTestV4GuardsTests(unittest.TestCase):
 
 
 class GeeTestV4ResponseTests(unittest.IsolatedAsyncioTestCase):
+    async def test_layout_waits_for_popup_animation(self) -> None:
+        raw = {
+            "bg_url": f'url("{_BG}")',
+            "piece_url": f'url("{_PIECE}")',
+            "bg_rect": [801, 357, 302, 201],
+            "piece_rect": [801, 400, 80, 80],
+            "handle_rect": [801, 567, 81, 51],
+            "rail_rect": [801, 560, 302, 60],
+        }
+        animated = {**raw, "bg_rect": [780, 355, 288, 190]}
+        samples = [animated, raw]
+        calls = 0
+
+        async def evaluate(_script: str) -> object:
+            nonlocal calls
+            calls += 1
+            return samples.pop(0) if len(samples) > 1 else samples[0]
+
+        result = await _read_layout(cast("Page", SimpleNamespace(evaluate=evaluate)), lambda: 2.0)
+        self.assertEqual(result, _layout(raw))
+        self.assertGreaterEqual(calls, 5)
+
     async def test_only_same_frame_successful_verify_can_accept(self) -> None:
         frame = object()
         page = SimpleNamespace(url="https://2captcha.com/demo/geetest-v4", main_frame=frame)

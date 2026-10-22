@@ -53,6 +53,7 @@ _MAX_IMAGE_BYTES = 500_000
 _MAX_VERIFY_BYTES = 65_536
 _MAX_TOKEN_LENGTH = 4096
 _OK_HTTP = 200
+_LAYOUT_SETTLE_SECONDS = 0.3
 _CALLBACK = re.compile(r"[A-Za-z_$][\w$]*\(")
 _READ_LAYOUT = """() => {
   const one = s => { const a = [...document.querySelectorAll(s)].filter(e => {
@@ -225,10 +226,16 @@ async def _show_slide(page: Page, native_tab: Tab, seconds_remaining: Callable[[
 
 async def _read_layout(page: Page, seconds_remaining: Callable[[], float]) -> _Layout | None:
     deadline = time.monotonic() + min(4.0, max(0.0, seconds_remaining()))
+    previous: _Layout | None = None
+    stable_since: float | None = None
     while time.monotonic() < deadline:
-        if (layout := _layout(await page.evaluate(_READ_LAYOUT))) is not None:
+        layout = _layout(await page.evaluate(_READ_LAYOUT))
+        now = time.monotonic()
+        if layout != previous:
+            previous, stable_since = layout, now if layout is not None else None
+        elif layout is not None and stable_since is not None and now - stable_since >= _LAYOUT_SETTLE_SECONDS:
             return layout
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(min(0.1, max(0.0, deadline - now)))
     return None
 
 
