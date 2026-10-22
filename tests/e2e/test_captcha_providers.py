@@ -133,6 +133,7 @@ async def _run(  # noqa: PLR0915 - one owned browser lifecycle
             mode = page.locator("select").filter(has=page.locator('option[value="smart"]'))
             await mode.select_option(label="One-click - User must click once", timeout=5000)
             await page.get_by_placeholder("Your full name").focus(timeout=5000)
+            await page.locator(".frc-captcha").wait_for(state="attached", timeout=12000)
             return await original_solver(page, *args, **kwargs)
 
         setup = (
