@@ -1,0 +1,42 @@
+name: Live CAPTCHA E2E
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  captcha:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PROWL_E2E: "1"
+      PROWL_VISION_VLM_ENDPOINT: ${{ vars.PROWL_E2E_VLM_ENDPOINT }}
+      PROWL_VISION_VLM_MODEL: ${{ vars.PROWL_E2E_VLM_MODEL }}
+      PROWL_VISION_VLM_HEADERS: ${{ vars.PROWL_E2E_VLM_HEADERS }}
+      PROWL_VISION_VLM_REASONING_EFFORT: ${{ vars.PROWL_E2E_VLM_REASONING_EFFORT }}
+      PROWL_VISION_VLM_API_KEY: ${{ secrets.PROWL_E2E_VLM_API_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+      - run: uv python install 3.12
+      - run: uv sync --all-extras --locked
+      - name: Install browser system libraries and virtual display
+        run: |
+          uv run python -m playwright install-deps chromium
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+      - name: Install CloakBrowser binary
+        env:
+          CLOAKBROWSER_AUTO_UPDATE: "false"
+        run: uv run python -c 'from cloakbrowser import ensure_binary; ensure_binary()'
+      - name: Live CAPTCHA providers
+        run: |
+          test -n "$PROWL_VISION_VLM_ENDPOINT" && test -n "$PROWL_VISION_VLM_MODEL" && test -n "$PROWL_VISION_VLM_API_KEY"
+          xvfb-run -a uv run pytest tests/e2e -q -s
