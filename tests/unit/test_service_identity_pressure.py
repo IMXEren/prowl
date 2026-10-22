@@ -85,12 +85,15 @@ class _PressureFixture(IsolatedAsyncioTestCase):
         """Replace ``close_interactive`` with a recorder that also removes the chosen tab."""
         closed: list[str] = []
 
-        async def close(tab_id: str | None) -> list[str]:
+        async def close(tab_id: str | None, *, allow_reserved: bool = False) -> list[str]:
             if tab_id is None:
-                ids = sorted(backend._tabs)
-                backend._tabs.clear()
+                ids = sorted(key for key, entry in backend._tabs.items() if allow_reserved or not entry.reserved)
+                for key in ids:
+                    backend._tabs.pop(key)
                 return ids
-            if backend._tabs.pop(tab_id, None) is not None:
+            entry = backend._tabs.get(tab_id)
+            if entry is not None and (allow_reserved or not entry.reserved):
+                backend._tabs.pop(tab_id)
                 closed.append(tab_id)
                 return [tab_id]
             return []

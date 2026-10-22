@@ -138,11 +138,12 @@ class ForwardProxyConfigTests(TestCase):
 
     def test_defaults_and_appended_field_order(self) -> None:
         names = [f.name for f in dataclasses.fields(ServiceConfig)]
-        self.assertEqual(names[-3:], ["forward_proxy_port", "proxy_ca_cert", "proxy_ca_key"])
+        self.assertEqual(names[-4:], ["forward_proxy_port", "proxy_ca_cert", "proxy_ca_key", "cdp_token"])
         config = ServiceConfig()
         self.assertIsNone(config.forward_proxy_port)
         self.assertIsNone(config.proxy_ca_cert)
         self.assertIsNone(config.proxy_ca_key)
+        self.assertIsNone(config.cdp_token)
 
     def test_env_values_are_parsed_and_blank_values_stay_disabled(self) -> None:
         with patch.dict(os.environ, {**_DISABLED, app_module.FORWARD_PROXY_PORT_ENV: "   "}):
