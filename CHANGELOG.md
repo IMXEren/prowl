@@ -1,3 +1,14 @@
+## [2.0.0-dev.7](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.6...v2.0.0-dev.7) (2026-10-22)
+
+### Bug Fixes
+
+* **captcha:** wait for stable GeeTest v4 layout ([05609e6](https://github.com/IMXEren/prowl/commit/05609e669861135dc0e5df82594ab7529e9279e8))
+
+### New Features
+
+* **service:** expose authenticated CDP reservation tunnel ([fd9e439](https://github.com/IMXEren/prowl/commit/fd9e439b045d4d6693040614fd21cbf389d7ee01))
+* **service:** reserve browser tabs with protected lifecycle ([43296a2](https://github.com/IMXEren/prowl/commit/43296a2e919b264cb160a288d974834041189e47))
+
 ## [2.0.0-dev.6](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.5...v2.0.0-dev.6) (2026-10-18)
 
 ### Bug Fixes
