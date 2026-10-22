@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from types import SimpleNamespace
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
@@ -427,6 +428,7 @@ class StubGroup:
     def __init__(self) -> None:
         self.quit_calls = 0
         self.ppage = StubGroup._StubPage()
+        self.target_id = "target-test"
 
     @property
     async def ptab(self) -> Any:
@@ -506,6 +508,8 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
                 created.append(name)
 
             class FakeEgressBrowser:
+                _lifecycle = SimpleNamespace(cdp_port=9223)
+
                 @classmethod
                 async def start(cls) -> None:
                     if start_error is not None:
@@ -519,7 +523,9 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
                         await create_gate.wait()
                     if create_error is not None:
                         raise create_error
-                    return _create_group()
+                    group = _create_group()
+                    group._owner = cls
+                    return group
 
                 @classmethod
                 async def shutdown(cls) -> None:
@@ -540,13 +546,17 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         class FakeDefaultBrowser:
             """Double for the process-wide browser, so no real Chrome is launched."""
 
+            _lifecycle = SimpleNamespace(cdp_port=9222)
+
             @classmethod
             async def start(cls) -> None:
                 """No-op."""
 
             @classmethod
             async def create(cls) -> StubGroup:
-                return _create_group()
+                group = _create_group()
+                group._owner = cls
+                return group
 
             @classmethod
             async def shutdown(cls) -> None:
@@ -595,6 +605,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
         with patch.object(backend_module, "resolve_page_handler", lambda _group, _url: _StubSite()):
             tab = (await backend.open_interactive(InteractiveRequest(url="https://example.com/", egress="decodo"))).tab
+        self.assertEqual(await backend.release_reserved_tab(tab.tab_id), [])
         closed = await backend.close_interactive(tab.tab_id)
         self.assertEqual(closed, [tab.tab_id])
         self.assertEqual(groups[0].quit_calls, 1)
@@ -875,4 +886,41 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
             await task
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, ["decodo"])
+        await backend.aclose()
+
+    async def test_reserved_tab_is_hidden_protected_and_closed_only_by_its_owner(self) -> None:
+        backend, groups = self._backend(idle_seconds=60, max_concurrency=1, steal_least_recent=True)
+        tab, target = await backend.reserve_tab()
+        self.assertEqual(target, "target-test")
+        self.assertEqual(await backend.list_interactive(), [])
+        self.assertEqual(await backend.close_interactive(tab), [])
+        self.assertEqual(await backend.close_interactive(None), [])
+        self.assertIsNone(await backend._steal_least_recent())
+        self.assertEqual(await backend.attach_reserved_tab(tab), 9222)
+        self.assertIsNone(await backend.attach_reserved_tab(tab))
+        self.assertEqual(await backend.release_reserved_tab(tab), [tab])
+        self.assertEqual(await backend.release_reserved_tab(tab), [])
+        self.assertEqual(groups[0].quit_calls, 1)
+        await backend.aclose()
+
+    async def test_reserved_named_egress_keeps_its_claim_until_closed(self) -> None:
+        shutdown_log: list[str] = []
+        backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
+        tab, _target = await backend.reserve_tab("decodo")
+        self.assertEqual(await backend.attach_reserved_tab(tab), 9223)
+        await asyncio.sleep(0.1)
+        self.assertEqual(shutdown_log, [])
+        self.assertEqual(await backend.close_interactive(tab, allow_reserved=True), [tab])
+        self.assertEqual(groups[0].quit_calls, 1)
+        await asyncio.sleep(0.1)
+        self.assertEqual(shutdown_log, ["decodo"])
+        await backend.aclose()
+
+    async def test_unattached_reservation_expires_even_with_interactive_idle_disabled(self) -> None:
+        backend, groups = self._backend(idle_seconds=0)
+        with patch("prowl.service.backend._RESERVATION_ATTACH_SECONDS", 0.01):
+            tab, _target = await backend.reserve_tab()
+            await asyncio.sleep(0.1)
+        self.assertEqual(groups[0].quit_calls, 1)
+        self.assertIsNone(await backend.attach_reserved_tab(tab))
         await backend.aclose()

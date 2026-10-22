@@ -86,6 +86,7 @@ DEFAULT_STEAL_LEAST_RECENT: Final[bool] = True
 #: Fewest open tabs for a takeover to be worth doing: with one tab there is nothing to pick that
 #: would not be the tab the caller is most likely looking at.
 _MIN_TABS_TO_STEAL: Final[int] = 2
+_RESERVATION_ATTACH_SECONDS: Final[int] = 30
 
 #: The HTTP methods the fast path can send.
 type _FetchMethod = Literal["GET", "POST"]
@@ -245,6 +246,8 @@ class _LiveTab:
     owns_claim: bool = True
     idle_task: asyncio.Task[None] | None = None
     last_used: float = 0.0
+    reserved: bool = False
+    attached: bool = False
 
 
 @dataclass(slots=True)
@@ -1048,6 +1051,51 @@ class BrowserBackend:
         logger.debug(f"Interactive {entry.tab.tab_id} opened, {len(self._tabs)} open.")
         return InteractiveOpenResult(tab=entry.tab)
 
+    async def reserve_tab(self, egress: str = DEFAULT_EGRESS_NAME) -> tuple[str, str]:
+        """Reserve a blank page and its egress claim before the caller navigates."""
+        owner = await self._owner_for(egress)
+        group = None
+        try:
+            await owner.start()
+            group = await self._create_group(owner)
+            async with self._tabs_lock:
+                self._tab_counter += 1
+                tab_id = f"tab-{self._tab_counter}"
+                self._tabs[tab_id] = _LiveTab(
+                    tab=InteractiveTab(tab_id=tab_id, url="about:blank", title="", status_code=None, egress=egress),
+                    group=group,
+                    reserved=True,
+                )
+                self._touch(self._tabs[tab_id])
+        except BaseException as exc:
+            try:
+                await self._quit_group(group, exc)
+            finally:
+                await self._release(egress)
+            raise
+        else:
+            return tab_id, group.target_id
+
+    async def release_reserved_tab(self, tab_id: str) -> list[str]:
+        """Release only a reserved tab, leaving normal interactive tabs untouched."""
+        async with self._tabs_lock:
+            entry = self._tabs.get(tab_id)
+            if entry is None or not entry.reserved:
+                return []
+        return await self.close_interactive(tab_id, allow_reserved=True)
+
+    async def attach_reserved_tab(self, tab_id: str) -> int | None:
+        """Attach one CDP client to the reservation's owning browser."""
+        async with self._tabs_lock:
+            entry = self._tabs.get(tab_id)
+            if entry is None or not entry.reserved or entry.attached or not _interactive_group_live(entry.group):
+                return None
+            entry.attached = True
+            if entry.idle_task is not None:
+                entry.idle_task.cancel()
+                entry.idle_task = None
+            return entry.group._owner._lifecycle.cdp_port  # noqa: SLF001 - owning browser's bound CDP port
+
     async def _retire_dead_tabs(self) -> list[str]:
         """Close interactive tabs whose native page is gone, releasing the claims they own.
 
@@ -1061,7 +1109,7 @@ class BrowserBackend:
         failure: BaseException | None = None
         for tab_id in dead_ids:
             try:
-                closed.extend(await self.close_interactive(tab_id))
+                closed.extend(await self.close_interactive(tab_id, allow_reserved=True))
             except Exception as exc:  # noqa: BLE001 - every dead tab is attempted, then the failure is raised
                 failure = failure or exc
                 logger.warning(f"Failed to retire dead interactive {tab_id}: {type(exc).__name__}")
@@ -1089,7 +1137,7 @@ class BrowserBackend:
                     return entry
         return None
 
-    async def close_interactive(self, tab_id: str | None) -> list[str]:
+    async def close_interactive(self, tab_id: str | None, *, allow_reserved: bool = False) -> list[str]:
         """Close one interactive tab, or every one when *tab_id* is None.
 
         A tab that is not open is ignored, so closing is idempotent. Every group is attempted
@@ -1098,10 +1146,10 @@ class BrowserBackend:
         """
         async with self._tabs_lock:
             if tab_id is None:
-                entries = list(self._tabs.items())
+                entries = [(key, entry) for key, entry in self._tabs.items() if allow_reserved or not entry.reserved]
             else:
                 entry = self._tabs.get(tab_id)
-                entries = [] if entry is None else [(tab_id, entry)]
+                entries = [] if entry is None or (entry.reserved and not allow_reserved) else [(tab_id, entry)]
             for key, entry in entries:
                 del self._tabs[key]
                 idle_task = entry.idle_task
@@ -1132,10 +1180,10 @@ class BrowserBackend:
         """List tabs; refresh only the named tab's idle countdown when it exists."""
         await self._retire_dead_tabs()
         async with self._tabs_lock:
-            entries = list(self._tabs.values())
+            entries = [entry for entry in self._tabs.values() if not entry.reserved]
             if tab_id is not None:
                 entry = self._tabs.get(tab_id)
-                if entry is not None:
+                if entry is not None and not entry.reserved:
                     self._touch(entry)
         tabs: list[InteractiveTab] = []
         for entry in entries:
@@ -1171,10 +1219,11 @@ class BrowserBackend:
         if not self._steal_least_recent_enabled:
             return None
         async with self._tabs_lock:
-            candidates = [entry for entry in self._tabs.values() if entry.tab.egress == egress]
+            busy = [entry for entry in self._tabs.values() if entry.tab.egress == egress]
+            candidates = [entry for entry in busy if not entry.reserved]
             if (
                 self._max_concurrency <= 0
-                or len(candidates) + self._in_flight_by_egress.get(egress, 0) < self._max_concurrency
+                or len(busy) + self._in_flight_by_egress.get(egress, 0) < self._max_concurrency
             ):
                 return None
             if len(candidates) < _MIN_TABS_TO_STEAL:
@@ -1188,7 +1237,9 @@ class BrowserBackend:
     def _touch(self, entry: _LiveTab) -> None:
         """Record use and restart an entry's idle countdown; a no-op when idling is disabled."""
         entry.last_used = time.monotonic()
-        if self._interactive_idle_seconds <= 0:
+        if entry.reserved and entry.attached:
+            return
+        if not entry.reserved and self._interactive_idle_seconds <= 0:
             return
         if entry.idle_task is not None:
             entry.idle_task.cancel()
@@ -1200,12 +1251,17 @@ class BrowserBackend:
         Only the interactive tab is closed here. Requests keep their own tab groups, so idling a
         tab out cannot disturb one that is in flight.
         """
-        await asyncio.sleep(self._interactive_idle_seconds)
+        delay = (
+            min(self._interactive_idle_seconds, _RESERVATION_ATTACH_SECONDS)
+            if self._interactive_idle_seconds > 0
+            else _RESERVATION_ATTACH_SECONDS
+        )
+        await asyncio.sleep(delay if entry.reserved else self._interactive_idle_seconds)
         async with self._tabs_lock:
-            if self._tabs.get(entry.tab.tab_id) is not entry:
+            if self._tabs.get(entry.tab.tab_id) is not entry or (entry.reserved and entry.attached):
                 return
         logger.debug(f"Interactive {entry.tab.tab_id} idle, closing.")
-        await self.close_interactive(entry.tab.tab_id)
+        await self.close_interactive(entry.tab.tab_id, allow_reserved=entry.reserved)
 
     async def _fetch_in_group(
         self,
@@ -1274,7 +1330,7 @@ class BrowserBackend:
         """
         failure: BaseException | None = None
         try:
-            await self.close_interactive(None)
+            await self.close_interactive(None, allow_reserved=True)
         except Exception as exc:  # noqa: BLE001 - the remaining resources are still closed
             failure = failure or exc
         async with self._isolated_lock:
