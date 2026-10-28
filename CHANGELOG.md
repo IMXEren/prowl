@@ -1,3 +1,9 @@
+## [2.0.0-dev.8](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.7...v2.0.0-dev.8) (2026-10-28)
+
+### New Features
+
+* **captcha:** solve challenges on reserved CDP tabs ([b98edbf](https://github.com/IMXEren/prowl/commit/b98edbf6378c94dc8b32294e552aa540d80aca79))
+
 ## [2.0.0-dev.7](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.6...v2.0.0-dev.7) (2026-10-22)
 
 ### Bug Fixes
