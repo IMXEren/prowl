@@ -46,6 +46,7 @@ from prowl.browser.proxy.egress import (
     DEFAULT_EGRESS_NAME,
     EgressPool,
 )
+from prowl.browser.solvers.reserved import ReservedCaptcha
 from prowl.service.browser_http import BrowserHttpClients
 from prowl.service.classification import CAPTCHA, CLOUDFLARE_CHALLENGE, SUCCESS, classify
 from prowl.service.context_state import ContextStateError, ContextStateStore
@@ -86,6 +87,7 @@ DEFAULT_STEAL_LEAST_RECENT: Final[bool] = True
 #: Fewest open tabs for a takeover to be worth doing: with one tab there is nothing to pick that
 #: would not be the tab the caller is most likely looking at.
 _MIN_TABS_TO_STEAL: Final[int] = 2
+#: How long a reservation waits for its CDP client.
 _RESERVATION_ATTACH_SECONDS: Final[int] = 30
 
 #: The HTTP methods the fast path can send.
@@ -248,6 +250,7 @@ class _LiveTab:
     last_used: float = 0.0
     reserved: bool = False
     attached: bool = False
+    captcha: ReservedCaptcha | None = None
 
 
 @dataclass(slots=True)
@@ -1055,9 +1058,14 @@ class BrowserBackend:
         """Reserve a blank page and its egress claim before the caller navigates."""
         owner = await self._owner_for(egress)
         group = None
+        captcha: ReservedCaptcha | None = None
         try:
             await owner.start()
             group = await self._create_group(owner)
+            site = PageHandler(group)
+            self._bind_vision(site)
+            captcha = ReservedCaptcha(group, site)
+            await captcha.start()
             async with self._tabs_lock:
                 self._tab_counter += 1
                 tab_id = f"tab-{self._tab_counter}"
@@ -1065,11 +1073,16 @@ class BrowserBackend:
                     tab=InteractiveTab(tab_id=tab_id, url="about:blank", title="", status_code=None, egress=egress),
                     group=group,
                     reserved=True,
+                    captcha=captcha,
                 )
                 self._touch(self._tabs[tab_id])
         except BaseException as exc:
             try:
-                await self._quit_group(group, exc)
+                try:
+                    if captcha is not None:
+                        await captcha.stop()
+                finally:
+                    await self._quit_group(group, exc)
             finally:
                 await self._release(egress)
             raise
@@ -1160,8 +1173,27 @@ class BrowserBackend:
                     idle_task.cancel()
 
         closed: list[str] = []
-        failure: BaseException | None = None
+        failure: Exception | None = None
         for key, entry in entries:
+            entry_failure = await self._close_live_tab(key, entry)
+            if entry_failure is None:
+                closed.append(key)
+            else:
+                failure = failure or entry_failure
+        if failure is not None:
+            raise failure
+        return closed
+
+    async def _close_live_tab(self, key: str, entry: _LiveTab) -> Exception | None:
+        failure: Exception | None = None
+        try:
+            try:
+                if entry.captcha is not None:
+                    await entry.captcha.stop()
+            except Exception as exc:  # noqa: BLE001 - still close the tab and release its egress
+                failure = exc
+                logger.warning(f"Failed to stop interactive CAPTCHA {key}: {type(exc).__name__}")
+        finally:
             try:
                 await entry.group.quit()
             except Exception as exc:  # noqa: BLE001 - every group is attempted, then the failure is raised
@@ -1170,11 +1202,7 @@ class BrowserBackend:
             finally:
                 if entry.owns_claim:
                     await self._release(entry.tab.egress)
-            if failure is None:
-                closed.append(key)
-        if failure is not None:
-            raise failure
-        return closed
+        return failure
 
     async def list_interactive(self, tab_id: str | None = None) -> list[InteractiveTab]:
         """List tabs; refresh only the named tab's idle countdown when it exists."""

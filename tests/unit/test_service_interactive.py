@@ -16,7 +16,7 @@ import os
 from types import SimpleNamespace
 from typing import Any
 from unittest import IsolatedAsyncioTestCase, TestCase
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from prowl.browser.config import BrowserConfig
 from prowl.browser.proxy.egress import DEFAULT_EGRESS_NAME
@@ -425,20 +425,40 @@ class StubGroup:
     class _StubPage:
         url = "https://example.com/from-page"
 
+        def __init__(self) -> None:
+            self.listeners: dict[str, list[Any]] = {}
+            self.main_frame = object()
+
+        def on(self, event: str, callback: Any) -> None:
+            self.listeners.setdefault(event, []).append(callback)
+
+        def remove_listener(self, event: str, callback: Any) -> None:
+            self.listeners[event].remove(callback)
+
+    class _Tab:
+        def __init__(self) -> None:
+            self.native_solver_started = 0
+            self.native_solver_stopped = 0
+
+        async def set_cookies(self, cookies: Any) -> None:
+            """Accept cookies, as the real tab does."""
+
+        async def enable_auto_solve_cloudflare_captcha(self, **_kwargs: Any) -> None:
+            self.native_solver_started += 1
+
+        async def disable_auto_solve_cloudflare_captcha(self) -> None:
+            self.native_solver_stopped += 1
+
     def __init__(self) -> None:
         self.quit_calls = 0
         self.ppage = StubGroup._StubPage()
+        self.native_tab = StubGroup._Tab()
         self.target_id = "target-test"
 
     @property
     async def ptab(self) -> Any:
-        """Return a parent tab double."""
-
-        class _Tab:
-            async def set_cookies(self, cookies: Any) -> None:
-                """Accept cookies, as the real tab does."""
-
-        return _Tab()
+        """Return the same native tab for activation and cleanup."""
+        return self.native_tab
 
     def pd(self) -> Any:
         """Return a cookie reader."""
@@ -892,6 +912,8 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         backend, groups = self._backend(idle_seconds=60, max_concurrency=1, steal_least_recent=True)
         tab, target = await backend.reserve_tab()
         self.assertEqual(target, "target-test")
+        self.assertEqual(groups[0].native_tab.native_solver_started, 1)
+        self.assertEqual(len(groups[0].ppage.listeners["domcontentloaded"]), 1)
         self.assertEqual(await backend.list_interactive(), [])
         self.assertEqual(await backend.close_interactive(tab), [])
         self.assertEqual(await backend.close_interactive(None), [])
@@ -900,6 +922,8 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         self.assertIsNone(await backend.attach_reserved_tab(tab))
         self.assertEqual(await backend.release_reserved_tab(tab), [tab])
         self.assertEqual(await backend.release_reserved_tab(tab), [])
+        self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
+        self.assertEqual(groups[0].ppage.listeners["domcontentloaded"], [])
         self.assertEqual(groups[0].quit_calls, 1)
         await backend.aclose()
 
@@ -914,6 +938,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         self.assertEqual(groups[0].quit_calls, 1)
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, ["decodo"])
+        self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
         await backend.aclose()
 
     async def test_unattached_reservation_expires_even_with_interactive_idle_disabled(self) -> None:
@@ -921,6 +946,149 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         with patch("prowl.service.backend._RESERVATION_ATTACH_SECONDS", 0.01):
             tab, _target = await backend.reserve_tab()
             await asyncio.sleep(0.1)
+        self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
         self.assertEqual(groups[0].quit_calls, 1)
         self.assertIsNone(await backend.attach_reserved_tab(tab))
+        await backend.aclose()
+
+    async def test_reserved_page_navigation_runs_existing_captcha_dispatch(self) -> None:
+        backend, groups = self._backend()
+        seen = asyncio.Event()
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            seen.set()
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch) as solve:
+            tab, _target = await backend.reserve_tab()
+            page = groups[0].ppage
+            page.url = "https://example.com/challenge"
+            page.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(seen.wait(), 1)
+            self.assertIn("turnstile", solve.call_args.kwargs["provider_attempts"])
+            self.assertEqual(await backend.release_reserved_tab(tab), [tab])
+            self.assertEqual(page.listeners["domcontentloaded"], [])
+        await backend.aclose()
+
+    async def test_reserved_provider_frame_after_load_restarts_scan(self) -> None:
+        backend, groups = self._backend()
+        seen = asyncio.Event()
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            seen.set()
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch) as solve:
+            tab, _target = await backend.reserve_tab()
+            page = groups[0].ppage
+            page.listeners["framenavigated"][0](SimpleNamespace(url="https://www.google.com/recaptcha/api2/anchor"))
+            await asyncio.wait_for(seen.wait(), 1)
+            self.assertEqual(solve.call_count, 1)
+            await backend.release_reserved_tab(tab)
+        await backend.aclose()
+
+    async def test_reserved_dispatch_keeps_existing_vision_opt_in(self) -> None:
+        from prowl.browser.solvers.vision.config import build_vision_settings  # noqa: PLC0415
+
+        backend, groups = self._backend()
+        backend._vision_settings = build_vision_settings()
+        backend._vision_vlm = SimpleNamespace(aclose=AsyncMock())
+        seen = asyncio.Event()
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            seen.set()
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch) as solve:
+            tab, _target = await backend.reserve_tab()
+            groups[0].ppage.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(seen.wait(), 1)
+            self.assertEqual(
+                set(solve.call_args.kwargs["provider_attempts"]),
+                {"turnstile", "geetest", "hcaptcha", "recaptcha"},
+            )
+            await backend.release_reserved_tab(tab)
+        await backend.aclose()
+
+    async def test_reserved_navigation_restarts_provider_scan_for_new_document(self) -> None:
+        backend, groups = self._backend()
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+        second = asyncio.Event()
+        attempts = 0
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+            second.set()
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch):
+            tab, _target = await backend.reserve_tab()
+            page = groups[0].ppage
+            page.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(entered.wait(), 1)
+            page.listeners["framenavigated"][0](page.main_frame)
+            page.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(second.wait(), 1)
+            self.assertTrue(cancelled.is_set())
+            self.assertEqual(attempts, 2)
+            await backend.release_reserved_tab(tab)
+        await backend.aclose()
+
+    async def test_releasing_reservation_cancels_inflight_provider_attempt(self) -> None:
+        backend, groups = self._backend()
+        entered = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch):
+            tab, _target = await backend.reserve_tab()
+            groups[0].ppage.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(entered.wait(), 1)
+            self.assertEqual(await backend.release_reserved_tab(tab), [tab])
+            self.assertTrue(cancelled.is_set())
+            self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
+        await backend.aclose()
+
+    async def test_reserved_solver_stop_failure_still_closes_tab_and_claim(self) -> None:
+        from prowl.browser.solvers.reserved import ReservedCaptcha  # noqa: PLC0415
+
+        shutdown_log: list[str] = []
+        backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
+        tab, _target = await backend.reserve_tab("decodo")
+        with (
+            patch.object(ReservedCaptcha, "stop", side_effect=RuntimeError("cannot stop")),
+            self.assertRaisesRegex(RuntimeError, "cannot stop"),
+        ):
+            await backend.release_reserved_tab(tab)
+        self.assertEqual(groups[0].quit_calls, 1)
+        await asyncio.sleep(0.1)
+        self.assertEqual(shutdown_log, ["decodo"])
+        await backend.aclose()
+
+    async def test_reserved_solver_start_failure_releases_tab_and_egress(self) -> None:
+        from prowl.browser.solvers.cloudflare import CloudflareSolver  # noqa: PLC0415
+
+        shutdown_log: list[str] = []
+        backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
+        with (
+            patch.object(CloudflareSolver, "start", side_effect=RuntimeError("cannot arm")),
+            self.assertRaisesRegex(RuntimeError, "cannot arm"),
+        ):
+            await backend.reserve_tab("decodo")
+        self.assertEqual(groups[0].quit_calls, 1)
+        self.assertEqual(await backend.list_interactive(), [])
+        await asyncio.sleep(0.1)
+        self.assertEqual(shutdown_log, ["decodo"])
         await backend.aclose()

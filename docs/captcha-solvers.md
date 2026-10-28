@@ -28,6 +28,8 @@ Use `solveCaptcha` on a browser or auto `request.get`:
 
 Auto selects the browser directly; POST and explicit HTTP requests cannot solve widgets. On success, `solution.captcha_provider` and `solution.captcha_token` contain the selected provider and its fresh response. These fields are absent when no response was obtained. Cloudflare interstitial handling also runs without `solveCaptcha` on the browser path.
 
+Authenticated CDP reservations arm the same Cloudflare solver before caller-driven navigation and run the existing visible-widget dispatcher on the reserved page. Solvers act on that tab only and stop when its reservation closes. Local GeeTest and cloud VLM adapters still require their existing opt-ins; page verification and site acceptance are not guaranteed.
+
 Visual adapters require `PROWL_VISION_ENABLED=true`. hCaptcha and reCAPTCHA v2 image solving also require an enabled and configured cloud VLM. GeeTest needs no VLM or neural model; its v4 image decoder uses Pillow from the optional `vision` extra. See [visual adapters](vision-engine.md) for configuration and supported challenge shapes.
 
-Solvers stay within the original request deadline and do not submit the application's form. Do not log or persist returned tokens. Live tests are opt-in under `tests/e2e/`; controlled browser fixtures under `tests/integration/` do not establish provider acceptance.
+Request solvers stay within the original request deadline; reserved-tab attempts are bounded separately. Solvers do not submit the application's form. Do not log or persist returned tokens. Live tests are opt-in under `tests/e2e/`; controlled browser fixtures under `tests/integration/` do not establish provider acceptance.
