@@ -1,3 +1,9 @@
+## [2.0.0-dev.11](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.10...v2.0.0-dev.11) (2026-10-29)
+
+### Dependencies
+
+* **deps:** bump pycryptodome from 4.0.1 to 4.2.0 ([#11](https://github.com/IMXEren/prowl/issues/11)) ([5e68222](https://github.com/IMXEren/prowl/commit/5e682226fb93e69f131fbcd2959c008abe5a0b12))
+
 ## [2.0.0-dev.10](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.9...v2.0.0-dev.10) (2026-10-29)
 
 ### Dependencies
