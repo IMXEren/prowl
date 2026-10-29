@@ -1,3 +1,12 @@
+## [2.0.0-dev.12](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.11...v2.0.0-dev.12) (2026-10-29)
+
+### Dependencies
+
+* **deps:** bump aiohttp to 3.14.5 ([d477d6b](https://github.com/IMXEren/prowl/commit/d477d6b59d761a62ef57b8c381f5d71ea53a37f4))
+* **deps:** bump cloakbrowser to 0.6.4 ([3a23a44](https://github.com/IMXEren/prowl/commit/3a23a4447c171a4cac8d0ce4e5a4600c662d8799))
+* **deps:** bump curl-cffi to 0.17.0 ([8320ec4](https://github.com/IMXEren/prowl/commit/8320ec4976f840330b3bc7b8472b72eb30f8ce7e))
+* **deps:** bump pydoll-python to 3.0.1 ([d6565c6](https://github.com/IMXEren/prowl/commit/d6565c640d592678e9277b04c5cde8d58b3cb67d))
+
 ## [2.0.0-dev.11](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.10...v2.0.0-dev.11) (2026-10-29)
 
 ### Dependencies
