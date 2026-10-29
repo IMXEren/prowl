@@ -1,3 +1,9 @@
+## [2.0.0-dev.9](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.8...v2.0.0-dev.9) (2026-10-29)
+
+### Bug Fixes
+
+* **browser:** migrate challenge handling to PyDoll 3 ([82fff0f](https://github.com/IMXEren/prowl/commit/82fff0f1bf4c6f3e5da65bcef83103b2fe8e0bfa))
+
 ## [2.0.0-dev.8](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.7...v2.0.0-dev.8) (2026-10-28)
 
 ### New Features
