@@ -1,3 +1,9 @@
+## [2.0.0-dev.10](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.9...v2.0.0-dev.10) (2026-10-29)
+
+### Dependencies
+
+* **deps:** bump turbohtml from 1.15.2 to 1.15.3 ([#10](https://github.com/IMXEren/prowl/issues/10)) ([e4ade9b](https://github.com/IMXEren/prowl/commit/e4ade9b67b349bf956e3368607c839bec5f8890a))
+
 ## [2.0.0-dev.9](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.8...v2.0.0-dev.9) (2026-10-29)
 
 ### Bug Fixes
