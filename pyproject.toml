@@ -12,7 +12,7 @@ license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 dependencies = [
     "loguru==0.7.3",
-    "cloakbrowser[geoip]==0.6.3",
+    "cloakbrowser[geoip]==0.6.4",
     "curl_cffi==0.17.0",
     "pydoll-python @ git+https://github.com/IMXEren/pydoll.git@3.0.0",
     "turbohtml==1.15.3",
