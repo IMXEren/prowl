@@ -1,4 +1,4 @@
-"""Run Prowl's existing CAPTCHA solvers on an externally navigated reserved tab."""
+"""Run Prowl's CAPTCHA solvers on an externally navigated reserved tab."""
 
 from __future__ import annotations
 
@@ -36,12 +36,11 @@ class ReservedCaptcha:
         self._listeners: list[tuple[str, Callable[..., None]]] = []
 
     async def start(self) -> None:
-        """Arm native Cloudflare handling before handing the target to the CDP caller."""
+        """Register listeners without solving the blank tab."""
         self.handler.tab = await self.group.ptab
         self.handler.timeout = _RESERVATION_CAPTCHA_SECONDS
         self.handler.start = time.perf_counter()
         try:
-            await self.handler.start_challenge_solver()
             self._started = True
             for name, callback in (("domcontentloaded", self._on_loaded), ("framenavigated", self._on_frame)):
                 self.page.on(name, callback)
@@ -92,7 +91,7 @@ class ReservedCaptcha:
             logger.warning("Reserved tab CAPTCHA attempt failed ({})", type(exc).__name__)
 
     async def stop(self) -> None:
-        """Remove only this tab's listeners and stop its native solver before closing it."""
+        """Remove this tab's listeners and stop any in-flight attempt before closing it."""
         self._started = False
         for name, callback in self._listeners:
             self.page.remove_listener(name, callback)
@@ -102,4 +101,3 @@ class ReservedCaptcha:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._attempt
             self._attempt = None
-        await self.handler._stop_challenge_solver()  # noqa: SLF001 - release same native tab

@@ -437,17 +437,13 @@ class StubGroup:
 
     class _Tab:
         def __init__(self) -> None:
-            self.native_solver_started = 0
-            self.native_solver_stopped = 0
+            self.native_handler_calls = 0
 
         async def set_cookies(self, cookies: Any) -> None:
             """Accept cookies, as the real tab does."""
 
-        async def enable_auto_solve_cloudflare_captcha(self, **_kwargs: Any) -> None:
-            self.native_solver_started += 1
-
-        async def disable_auto_solve_cloudflare_captcha(self) -> None:
-            self.native_solver_stopped += 1
+        async def handle_cloudflare_turnstile(self, *, time_to_wait_captcha: float) -> None:
+            self.native_handler_calls += 1
 
     def __init__(self) -> None:
         self.quit_calls = 0
@@ -912,7 +908,7 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         backend, groups = self._backend(idle_seconds=60, max_concurrency=1, steal_least_recent=True)
         tab, target = await backend.reserve_tab()
         self.assertEqual(target, "target-test")
-        self.assertEqual(groups[0].native_tab.native_solver_started, 1)
+        self.assertEqual(groups[0].native_tab.native_handler_calls, 0)
         self.assertEqual(len(groups[0].ppage.listeners["domcontentloaded"]), 1)
         self.assertEqual(await backend.list_interactive(), [])
         self.assertEqual(await backend.close_interactive(tab), [])
@@ -922,7 +918,6 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         self.assertIsNone(await backend.attach_reserved_tab(tab))
         self.assertEqual(await backend.release_reserved_tab(tab), [tab])
         self.assertEqual(await backend.release_reserved_tab(tab), [])
-        self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
         self.assertEqual(groups[0].ppage.listeners["domcontentloaded"], [])
         self.assertEqual(groups[0].quit_calls, 1)
         await backend.aclose()
@@ -938,7 +933,6 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         self.assertEqual(groups[0].quit_calls, 1)
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, ["decodo"])
-        self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
         await backend.aclose()
 
     async def test_unattached_reservation_expires_even_with_interactive_idle_disabled(self) -> None:
@@ -946,7 +940,6 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         with patch("prowl.service.backend._RESERVATION_ATTACH_SECONDS", 0.01):
             tab, _target = await backend.reserve_tab()
             await asyncio.sleep(0.1)
-        self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
         self.assertEqual(groups[0].quit_calls, 1)
         self.assertIsNone(await backend.attach_reserved_tab(tab))
         await backend.aclose()
@@ -1058,7 +1051,6 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 1)
             self.assertEqual(await backend.release_reserved_tab(tab), [tab])
             self.assertTrue(cancelled.is_set())
-            self.assertEqual(groups[0].native_tab.native_solver_stopped, 1)
         await backend.aclose()
 
     async def test_reserved_solver_stop_failure_still_closes_tab_and_claim(self) -> None:
@@ -1077,14 +1069,14 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         self.assertEqual(shutdown_log, ["decodo"])
         await backend.aclose()
 
-    async def test_reserved_solver_start_failure_releases_tab_and_egress(self) -> None:
-        from prowl.browser.solvers.cloudflare import CloudflareSolver  # noqa: PLC0415
+    async def test_reserved_captcha_start_failure_releases_tab_and_egress(self) -> None:
+        from prowl.browser.solvers.reserved import ReservedCaptcha  # noqa: PLC0415
 
         shutdown_log: list[str] = []
         backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
         with (
-            patch.object(CloudflareSolver, "start", side_effect=RuntimeError("cannot arm")),
-            self.assertRaisesRegex(RuntimeError, "cannot arm"),
+            patch.object(ReservedCaptcha, "start", side_effect=RuntimeError("cannot observe")),
+            self.assertRaisesRegex(RuntimeError, "cannot observe"),
         ):
             await backend.reserve_tab("decodo")
         self.assertEqual(groups[0].quit_calls, 1)

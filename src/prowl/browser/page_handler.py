@@ -134,7 +134,7 @@ class PageHandler:
         self.redirected_url: str | None = None
         self.cf_encountered: bool = False
         self.cf_encountered_on_url: str | None = None
-        self.cf_auto_solve_enabled: bool = False
+        self.cf_solver_started: bool = False
         self.user_agent: str | None = None
         self._on_request_callback_id: int | None = None
         self._header_route_matcher: Any = None
@@ -182,7 +182,7 @@ class PageHandler:
                 await self._install_scoped_headers(headers, header_scope)
             await self._add_network_listeners()
             await self.tab.enable_page_events()
-            if solve_captcha:
+            if solve_captcha and type(self.challenge_solver) is not CloudflareSolver:
                 await self.start_challenge_solver()
             await self.tab.go_to(self.url, timeout=round(self.get_time_left()))
 
@@ -308,7 +308,7 @@ class PageHandler:
             raise PageLoadError(msg)
 
     async def _verify_with_native_solver(self: Self, page: "Page", initial: list[str]) -> tuple[bool, str | None]:
-        if self._active_solver is None or not isinstance(self._active_solver[0], CloudflareSolver):
+        if self._active_solver is not None and type(self._active_solver[0]) is not CloudflareSolver:
             return False, None
         if any(initial):
             response = await page.evaluate(_TURNSTILE_RESPONSE_EXPRESSION)
@@ -458,7 +458,7 @@ class PageHandler:
         """Warm *url*'s origin root through the normal GET solver path.
 
         Delegating to :func:`resolve_page_handler` routes the origin root through the
-        same Cloudflare detection and auto-solve a normal GET uses, so a
+        same Cloudflare detection and challenge handling a normal GET uses, so a
         protected origin is genuinely warmed before the same-origin POST fetch
         runs. The warm fetch owns and releases its own page listeners.
         """
@@ -473,7 +473,7 @@ class PageHandler:
             return
         solver_released = True
         try:
-            if self._active_solver is not None or self.cf_auto_solve_enabled:
+            if self._active_solver is not None or self.cf_solver_started:
                 solver_released = False
                 await self._stop_challenge_solver()
                 solver_released = True
@@ -661,8 +661,8 @@ class PageHandler:
                 self.cf_encountered = True
                 self.cf_encountered_on_url = url
                 logger.debug("[Cloudflare] encountered the checkbox challenge")
-                if not self.cf_auto_solve_enabled:
-                    logger.debug("[Cloudflare] enabled auto-solving the challenge")
+                if not self.cf_solver_started:
+                    logger.debug("[Cloudflare] handling the observed challenge")
                     await self.start_challenge_solver()
 
     async def start_challenge_solver(self: Self) -> None:
@@ -680,7 +680,7 @@ class PageHandler:
         self._active_solver = (solver, tab)
         async with asyncio.timeout(self.get_time_left()):
             await solver.start(tab)
-        self.cf_auto_solve_enabled = True
+        self.cf_solver_started = True
 
     async def _stop_challenge_solver(self: Self) -> None:
         """Stop the owned challenge solver, releasing ownership only on success.
@@ -693,13 +693,13 @@ class PageHandler:
         """
         owned = self._active_solver
         if owned is None:
-            if not self.cf_auto_solve_enabled:
+            if not self.cf_solver_started:
                 return
             owned = (self.challenge_solver, self.tab)
         solver, tab = owned
         await solver.stop(tab)
         self._active_solver = None
-        self.cf_auto_solve_enabled = False
+        self.cf_solver_started = False
 
     async def build_dom_tree(self) -> Element:
         """Build full DOM tree as a turbohtml Element.

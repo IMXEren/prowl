@@ -29,15 +29,14 @@ class ChallengeSolver(Protocol):
 
 
 class CloudflareSolver:
-    """Cloudflare checkbox solver backed by the native auto-solve calls."""
+    """Handle an observed Cloudflare challenge on the selected native tab."""
 
     async def start(self, tab: Tab) -> None:
-        """Enable the native Cloudflare auto-solve on *tab*."""
-        await tab.enable_auto_solve_cloudflare_captcha(time_before_click=1, time_to_wait_captcha=30)
+        """Use PyDoll's bounded, on-demand Turnstile traversal."""
+        await tab.handle_cloudflare_turnstile(time_to_wait_captcha=30)
 
     async def stop(self, tab: Tab) -> None:
-        """Disable the native Cloudflare auto-solve on *tab*."""
-        await tab.disable_auto_solve_cloudflare_captcha()
+        """The on-demand traversal installs no persistent listener."""
 
 
 def _closed_body_shadows(root: PDNode) -> list[int]:

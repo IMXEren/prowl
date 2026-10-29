@@ -55,17 +55,17 @@ def _site(solver: ChallengeSolver | None = None) -> tuple[PageHandler, Mock]:
 
 
 class CloudflareSolverTests(IsolatedAsyncioTestCase):
-    """The built-in solver issues exactly the current native auto-solve calls."""
+    """The built-in solver handles only the observed challenge."""
 
-    async def test_builtin_solver_uses_exact_native_calls(self) -> None:
+    async def test_builtin_solver_uses_on_demand_native_handler(self) -> None:
         tab = Mock(spec=Tab)
         solver = CloudflareSolver()
 
         await solver.start(tab)
-        tab.enable_auto_solve_cloudflare_captcha.assert_awaited_once_with(time_before_click=1, time_to_wait_captcha=30)
+        tab.handle_cloudflare_turnstile.assert_awaited_once_with(time_to_wait_captcha=30)
 
         await solver.stop(tab)
-        tab.disable_auto_solve_cloudflare_captcha.assert_awaited_once_with()
+        tab.handle_cloudflare_turnstile.assert_awaited_once()
 
 
 class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
@@ -93,8 +93,18 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
 
         override.start.assert_awaited_once_with(tab)
         default_start.assert_not_awaited()
-        self.assertTrue(site.cf_auto_solve_enabled)
+        self.assertTrue(site.cf_solver_started)
         self.assertTrue(site.cf_encountered)
+
+    async def test_detected_challenge_uses_on_demand_native_handler(self) -> None:
+        site, tab = _site()
+
+        await site._check_cf_encounter(_TARGET, _CHALLENGE_BODY)
+
+        tab.handle_cloudflare_turnstile.assert_awaited_once_with(time_to_wait_captcha=30)
+        self.assertTrue(site.cf_encountered)
+        await site._cleanup()
+        tab.handle_cloudflare_turnstile.assert_awaited_once()
 
     async def test_plain_title_does_not_start_solver(self) -> None:
         solver = Mock(spec=ChallengeSolver)
@@ -104,7 +114,7 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
 
         solver.start.assert_not_awaited()
         self.assertFalse(site.cf_encountered)
-        self.assertFalse(site.cf_auto_solve_enabled)
+        self.assertFalse(site.cf_solver_started)
 
     async def test_duplicate_activation_starts_once(self) -> None:
         solver = Mock(spec=ChallengeSolver)
@@ -114,7 +124,7 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
         await site.start_challenge_solver()
 
         solver.start.assert_awaited_once_with(tab)
-        self.assertTrue(site.cf_auto_solve_enabled)
+        self.assertTrue(site.cf_solver_started)
 
     async def test_cancelled_start_still_stops_captured_tab(self) -> None:
         solver = Mock(spec=ChallengeSolver)
@@ -124,7 +134,7 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await site.start_challenge_solver()
         self.assertEqual(site._active_solver, (solver, tab))
-        self.assertFalse(site.cf_auto_solve_enabled)
+        self.assertFalse(site.cf_solver_started)
 
         await site._cleanup()
 
@@ -143,7 +153,7 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
             await site._cleanup()
         self.assertFalse(site.cleanup_done)
         self.assertEqual(site._active_solver, (solver, tab))
-        self.assertTrue(site.cf_auto_solve_enabled)
+        self.assertTrue(site.cf_solver_started)
         tab.disable_page_events.assert_awaited_once()
 
         with self.assertRaises(PageLoadError):
@@ -158,7 +168,7 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
         solver.stop.assert_awaited_once_with(tab)
         replacement.stop.assert_not_awaited()
         self.assertIsNone(site._active_solver)
-        self.assertFalse(site.cf_auto_solve_enabled)
+        self.assertFalse(site.cf_solver_started)
         self.assertTrue(site.cleanup_done)
 
     async def test_cleanup_without_challenge_keeps_default_behavior(self) -> None:
@@ -171,7 +181,7 @@ class PageHandlerChallengeSolverTests(IsolatedAsyncioTestCase):
         tab.disable_page_events.assert_awaited_once()
         tab.disable_fetch_events.assert_awaited_once()
         self.assertTrue(site.cleanup_done)
-        self.assertFalse(site.cf_auto_solve_enabled)
+        self.assertFalse(site.cf_solver_started)
 
 
 def _iframe_tab(node_ids: list[int]) -> Mock:

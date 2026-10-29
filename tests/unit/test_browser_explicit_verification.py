@@ -73,6 +73,8 @@ def _page(
 def _site(group: Mock) -> PageHandler:
     """Return a PageHandler whose original request still has time left on the clock."""
     site = PageHandler(group)
+    site.tab = Mock(spec=Tab)
+    site.tab._browser_context_id = None
     site.timeout = 30
     site.start = time.perf_counter()
     return site
@@ -120,14 +122,13 @@ class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
         self.assertIn("initial.includes(input.value)", expression)
         self.assertNotIn("previous", expression)
 
-    async def test_owned_native_checkbox_waits_without_fallback(self) -> None:
+    async def test_native_checkbox_without_eager_solver_waits_without_fallback(self) -> None:
         group = Mock(spec=TabGroup)
         page, _ = _page(wait_return=_handle("fresh"))
         group.ppage = page
         site = _site(group)
         tab = Mock(spec=Tab)
         site.tab = tab
-        site._active_solver = (CloudflareSolver(), tab)
         with (
             patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock(return_value=True)) as click,
             patch("prowl.browser.page_handler.find_and_click_turnstile", AsyncMock()) as fallback,
@@ -146,7 +147,6 @@ class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
         site = _site(group)
         tab = Mock(spec=Tab)
         site.tab = tab
-        site._active_solver = (CloudflareSolver(), tab)
         with patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock()) as click:
             self.assertEqual(await site.verify_turnstile(), "issued")
         click.assert_not_awaited()
@@ -160,7 +160,6 @@ class SiteVerifyTurnstileTests(IsolatedAsyncioTestCase):
         site = _site(group)
         tab = Mock(spec=Tab)
         site.tab = tab
-        site._active_solver = (CloudflareSolver(), tab)
         with patch("prowl.browser.page_handler.click_embedded_turnstile", AsyncMock(return_value=False)):
             self.assertEqual(await site.verify_turnstile(), "new-value")
         page.evaluate.assert_awaited_once()
@@ -301,8 +300,12 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
         group.ppage = page
         return group, tab
 
-    async def _run_get(self, group: Mock, *, solve_captcha: bool, tree: Element) -> PageResponse:
+    async def _run_get(
+        self, group: Mock, *, solve_captcha: bool, tree: Element, solver: CloudflareSolver | None = None
+    ) -> PageResponse:
         site = _site(group)
+        if solver is not None:
+            site.challenge_solver = solver
         with (
             patch.object(PageHandler, "_add_network_listeners", AsyncMock()),
             patch.object(PageHandler, "_remove_network_listeners", AsyncMock()),
@@ -319,7 +322,7 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
             result = await self._run_get(group, solve_captcha=False, tree=_document("Ready"))
 
         verify.assert_not_called()
-        tab.enable_auto_solve_cloudflare_captcha.assert_not_awaited()
+        tab.handle_cloudflare_turnstile.assert_not_awaited()
         self.assertIsNone(result.captcha_token)
         self.assertIsNone(result.url)
         self.assertEqual(tab.go_to.await_count, 1)
@@ -329,9 +332,7 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
         seen: list[bool] = []
 
         async def _go_to(*_args: object, **_kwargs: object) -> None:
-            tab.enable_auto_solve_cloudflare_captcha.assert_awaited_once_with(
-                time_before_click=1, time_to_wait_captcha=30
-            )
+            tab.handle_cloudflare_turnstile.assert_not_awaited()
 
         tab.go_to = AsyncMock(side_effect=_go_to)
 
@@ -348,7 +349,28 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
         self.assertEqual(result.captcha_provider, "turnstile")
         self.assertEqual(result.captcha_token, "tok")
         self.assertEqual(result.url, "https://example.com/verified")
-        tab.disable_auto_solve_cloudflare_captcha.assert_awaited_once()
+        tab.handle_cloudflare_turnstile.assert_not_awaited()
+
+    async def test_custom_solver_still_arms_before_navigation(self) -> None:
+        group, tab = self._group()
+
+        class CustomSolver(CloudflareSolver):
+            def __init__(self) -> None:
+                self.started_tab: Tab | None = None
+
+            async def start(self, tab: Tab) -> None:
+                self.started_tab = tab
+
+        solver = CustomSolver()
+
+        async def _go_to(*_args: object, **_kwargs: object) -> None:
+            self.assertIs(solver.started_tab, tab)
+
+        tab.go_to = AsyncMock(side_effect=_go_to)
+        with patch.object(PageHandler, "verify_turnstile", AsyncMock(return_value=None)):
+            await self._run_get(group, solve_captcha=True, tree=_document("Ready"), solver=solver)
+        self.assertIs(solver.started_tab, tab)
+        tab.handle_cloudflare_turnstile.assert_not_awaited()
 
     async def test_explicit_page_load_defers_solver_cleanup_until_token_check(self) -> None:
         group, tab = self._group()
@@ -357,13 +379,14 @@ class SiteGetVerificationTests(IsolatedAsyncioTestCase):
         site.response_found = True
         site._loaded.set()
         solver = CloudflareSolver()
+        solver.stop = AsyncMock()
         site._active_solver = (solver, tab)
-        site.cf_auto_solve_enabled = True
+        site.cf_solver_started = True
 
         self.assertTrue(await site._check_if_loaded(cleanup=False))
-        tab.disable_auto_solve_cloudflare_captcha.assert_not_awaited()
+        solver.stop.assert_not_awaited()
         await site._cleanup()
-        tab.disable_auto_solve_cloudflare_captcha.assert_awaited_once()
+        solver.stop.assert_awaited_once_with(tab)
 
     async def test_enabled_get_reports_bounded_token_timeout(self) -> None:
         group, _ = self._group()
