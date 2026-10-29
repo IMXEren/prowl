@@ -1298,7 +1298,7 @@ requires-dist = [
     { name = "loguru", specifier = "==0.7.3" },
     { name = "pillow", marker = "extra == 'vision'", specifier = "==13.0.0" },
     { name = "pycryptodome", specifier = "==4.2.0" },
-    { name = "pydoll-python", git = "https://github.com/IMXEren/pydoll.git?rev=3.0.0" },
+    { name = "pydoll-python", git = "https://github.com/IMXEren/pydoll.git?rev=3.0.1" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==9.1.1" },
     { name = "pytest", marker = "extra == 'test'", specifier = "==9.1.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.17.1" },
@@ -1433,8 +1433,8 @@ wheels = [
 
 [[package]]
 name = "pydoll-python"
-version = "3.0.0"
-source = { git = "https://github.com/IMXEren/pydoll.git?rev=3.0.0#6fce41ef1158573ab93757d4e73959924590d7e2" }
+version = "3.0.1"
+source = { git = "https://github.com/IMXEren/pydoll.git?rev=3.0.1#4777e0a5eb5ee00271c99c7d87529c8bca3f4ce5" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
