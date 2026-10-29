@@ -36,9 +36,12 @@ from prowl.browser.proxy.certificates import ProxyCertificates
 from prowl.browser.proxy.egress import (
     DEFAULT_EGRESS_IDLE_SECONDS,
     DEFAULT_EGRESS_NAME,
+    EGRESS_BOUNDARY_ENV,
     EGRESS_IDLE_SECONDS_ENV,
     EGRESSES_ENV,
+    EgressBoundary,
     EgressError,
+    parse_egress_boundary,
     parse_egress_spec,
 )
 from prowl.browser.proxy.server import ProxyServer
@@ -232,6 +235,7 @@ class ServiceConfig:
     proxy_url: str | None = field(default=None, repr=False)
     egresses: dict[str, str] = field(default_factory=dict, repr=False)
     egress_idle_seconds: float = DEFAULT_EGRESS_IDLE_SECONDS
+    egress_boundary: EgressBoundary = EgressBoundary.PROCESS
     interactive_idle_seconds: float = DEFAULT_INTERACTIVE_IDLE_SECONDS
     steal_least_recent: bool = DEFAULT_STEAL_LEAST_RECENT
     profile_dir: str = field(default_factory=default_profile_dir)
@@ -283,6 +287,7 @@ class ServiceConfig:
         if self.max_contexts < 1:
             msg = f"{MAX_CONTEXTS_ENV} must be an integer of at least 1, got {self.max_contexts!r}"
             raise ValueError(msg)
+        self.egress_boundary = parse_egress_boundary(self.egress_boundary)
         if self.forward_proxy_port is not None and not 0 <= self.forward_proxy_port <= _MAX_PORT:
             msg = f"{FORWARD_PROXY_PORT_ENV} must be an integer between 0 and {_MAX_PORT}"
             raise ValueError(msg)
@@ -351,6 +356,7 @@ class ServiceConfig:
             proxy_url=proxy_url,
             egresses=egresses,
             egress_idle_seconds=_egress_idle_seconds(),
+            egress_boundary=parse_egress_boundary(os.environ.get(EGRESS_BOUNDARY_ENV, EgressBoundary.PROCESS)),
             interactive_idle_seconds=_interactive_idle_seconds(),
             steal_least_recent=_steal_least_recent(),
             profile_dir=default_profile_dir(),
@@ -960,6 +966,7 @@ def run_server(config: ServiceConfig | None = None, backend: Backend | None = No
         ),
         egresses=resolved.egresses,
         egress_idle_seconds=resolved.egress_idle_seconds,
+        egress_boundary=resolved.egress_boundary,
         interactive_idle_seconds=resolved.interactive_idle_seconds,
         steal_least_recent=resolved.steal_least_recent,
         max_concurrency=resolved.max_concurrency,

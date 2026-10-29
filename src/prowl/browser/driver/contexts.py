@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from playwright.async_api import BrowserContext as PWBrowserCtx
-    from playwright.async_api import ViewportSize
+    from playwright.async_api import ProxySettings, ViewportSize
 
 
 class PersonaContextOptions(TypedDict, total=False):
@@ -34,6 +34,7 @@ class PersonaContextOptions(TypedDict, total=False):
     no_viewport: bool
     screen: ViewportSize
     color_scheme: Literal["dark", "light", "no-preference", "null"]
+    proxy: ProxySettings
 
 
 _PERSONA_CONTEXT_OPTIONS = {

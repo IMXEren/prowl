@@ -571,9 +571,17 @@ class ProxyPolicyTests(IsolatedAsyncioTestCase):
         self.assertEqual(body["status"], "error")
         self.assertIn("scheme", body["message"])
 
-    async def test_configured_proxy_with_credentials_is_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            Service(_config(proxy_url="socks5://user:secret@127.0.0.1:1080"), FakeBackend())
+    async def test_configured_socks5_credentials_stay_operator_only(self) -> None:
+        configured = "socks5://user:secret@127.0.0.1:1080"
+        config = _config(proxy_url=configured)
+        service = Service(config, FakeBackend())
+        self.assertEqual(service.egresses["default"], configured)
+        self.assertNotIn("secret", repr(config))
+        _, body = await service.handle(
+            {"cmd": "request.get", "url": "https://example.com/", "proxy": {"url": configured}}
+        )
+        self.assertEqual(body["status"], "error")
+        self.assertNotIn("secret", body["message"])
 
     async def test_operator_http_proxy_credentials_are_configured_but_never_accepted_from_caller(self) -> None:
         configured = "https://user:secret@127.0.0.1:10001"
@@ -608,7 +616,7 @@ class ProxyPolicyTests(IsolatedAsyncioTestCase):
         for url in (
             "https://user:secret@127.0.0.1:10001/path",
             "https://user:secret@127.0.0.1:bad",
-            "socks5://user:secret@127.0.0.1:10001",
+            "socks5://user:secret@127.0.0.1",
         ):
             with self.subTest(url=url), self.assertRaises(ValueError) as failure:
                 Service(_config(proxy_url=url), FakeBackend())

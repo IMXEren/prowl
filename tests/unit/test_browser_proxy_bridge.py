@@ -87,6 +87,77 @@ class _Upstream:
                 await writer.wait_closed()
 
 
+class _SocksUpstream:
+    """SOCKS5 endpoint that forwards only to a local test server without resolving the requested host."""
+
+    def __init__(self, destination_port: int, *, authenticated: bool) -> None:
+        self.destination_port = destination_port
+        self.authenticated = authenticated
+        self.targets: list[tuple[str, int]] = []
+        self.methods: list[bytes] = []
+        self.server: asyncio.Server | None = None
+        self.port = 0
+
+    async def start(self) -> None:
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", 0)
+        assert self.server.sockets
+        self.port = int(self.server.sockets[0].getsockname()[1])
+
+    async def aclose(self) -> None:
+        assert self.server is not None
+        self.server.close()
+        await self.server.wait_closed()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        remote_writer: asyncio.StreamWriter | None = None
+        try:
+            version, count = await reader.readexactly(2)
+            methods = await reader.readexactly(count)
+            self.methods.append(methods)
+            method = 2 if self.authenticated else 0
+            assert version == 5
+            assert method in methods
+            writer.write(bytes((5, method)))
+            await writer.drain()
+            if self.authenticated:
+                version, length = await reader.readexactly(2)
+                username = await reader.readexactly(length)
+                password = await reader.readexactly((await reader.readexactly(1))[0])
+                assert (version, username, password) == (1, b"user", b"pass")
+                writer.write(b"\x01\x00")
+                await writer.drain()
+            version, command, reserved, kind = await reader.readexactly(4)
+            assert (version, command, reserved) == (5, 1, 0)
+            if kind == 3:
+                host = (await reader.readexactly((await reader.readexactly(1))[0])).decode("ascii")
+            else:
+                msg = "expected a remote-DNS hostname"
+                raise AssertionError(msg)
+            port = int.from_bytes(await reader.readexactly(2), "big")
+            self.targets.append((host, port))
+            remote_reader, remote_writer = await asyncio.open_connection("127.0.0.1", self.destination_port)
+            writer.write(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+            await writer.drain()
+            tasks = [
+                asyncio.create_task(self._copy(reader, remote_writer)),
+                asyncio.create_task(self._copy(remote_reader, writer)),
+            ]
+            _, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            writer.close()
+            if remote_writer is not None:
+                remote_writer.close()
+
+    @staticmethod
+    async def _copy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        while data := await reader.read(65536):
+            writer.write(data)
+            await writer.drain()
+
+
 class BridgeTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.upstream = _Upstream()
@@ -146,6 +217,56 @@ class BridgeTests(IsolatedAsyncioTestCase):
         await writer.drain()
         self.assertEqual(await asyncio.wait_for(reader.readexactly(4), 5), b"ping")
         writer.close()
+
+    async def test_authenticated_socks_http_uses_remote_dns_and_origin_form(self) -> None:
+        socks = _SocksUpstream(self.upstream.port, authenticated=True)
+        await socks.start()
+        self.addAsyncCleanup(socks.aclose)
+        await self._start_bridge(f"socks5://user:pass@127.0.0.1:{socks.port}")
+        reader, writer = await self._connect()
+        writer.write(b"GET http://example.test/path?q=1 HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        await writer.drain()
+        self.assertIn(b"upstream-body", await self._read_all(reader))
+        writer.close()
+        self.assertEqual(socks.methods, [b"\x02"])
+        self.assertEqual(socks.targets, [("example.test", 80)])
+        self.assertIn(b"GET /path?q=1 HTTP/1.1", self.upstream.heads[0])
+        self.assertNotIn(b"Proxy-Authorization", self.upstream.heads[0])
+
+    async def test_unauthenticated_socks_connect_preserves_verified_tls(self) -> None:
+        await self._socks_connect_preserves_verified_tls(authenticated=False)
+
+    async def test_authenticated_socks_connect_preserves_verified_tls(self) -> None:
+        await self._socks_connect_preserves_verified_tls(authenticated=True)
+
+    async def _socks_connect_preserves_verified_tls(self, *, authenticated: bool) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            ca_cert, ca_key = _generate_authority(Path(directory))
+            tls_upstream = _Upstream()
+            await tls_upstream.start(ssl_context=ProxyCertificates(ca_cert, ca_key).context_for("example.test"))
+            socks = _SocksUpstream(tls_upstream.port, authenticated=authenticated)
+            await socks.start()
+            try:
+                credentials = "user:pass@" if authenticated else ""
+                await self._start_bridge(f"socks5://{credentials}127.0.0.1:{socks.port}")
+                reader, writer = await self._connect()
+                try:
+                    writer.write(b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test:443\r\n\r\n")
+                    await writer.drain()
+                    head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
+                    self.assertTrue(head.startswith(b"HTTP/1.1 200 "), head[:40])
+                    context = ssl.create_default_context(cafile=str(ca_cert))
+                    await writer.start_tls(context, server_hostname="example.test")
+                    writer.write(b"GET /path HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    self.assertIn(b"upstream-body", await self._read_all(reader))
+                    self.assertEqual(socks.methods, [b"\x02" if authenticated else b"\x00"])
+                    self.assertEqual(socks.targets, [("example.test", 443)])
+                finally:
+                    writer.close()
+            finally:
+                await socks.aclose()
+                await tls_upstream.aclose()
 
     async def test_post_body_is_forwarded_exactly(self) -> None:
         await self._start_bridge()

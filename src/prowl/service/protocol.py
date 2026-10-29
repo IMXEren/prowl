@@ -637,15 +637,15 @@ def _classify_proxy_url(url: str, *, configured: bool = False) -> str | None:
 
 
 def _configured_proxy_auth_error(parts: SplitResult) -> str | None:
-    if parts.scheme.lower() not in {"http", "https"}:
-        return "authenticated proxy must use http or https"
+    if parts.scheme.lower() not in {"http", "https", "socks5"}:
+        return "authenticated proxy must use http, https, or socks5"
     if not parts.username or parts.password is None:
         return "authenticated proxy requires a username and password"
     try:
         port = parts.port
     except ValueError:
         return "authenticated proxy port is not valid"
-    if port is not None and not 1 <= port <= _MAX_PROXY_PORT:
+    if (parts.scheme.lower() == "socks5" and port is None) or (port is not None and not 1 <= port <= _MAX_PROXY_PORT):
         return "authenticated proxy port is not valid"
     if parts.path or parts.query or parts.fragment:
         return "authenticated proxy must not include a path, query, or fragment"
@@ -653,7 +653,7 @@ def _configured_proxy_auth_error(parts: SplitResult) -> str | None:
 
 
 def validate_configured_proxy_url(url: str) -> str:
-    """Validate an operator-configured egress; credentials require the loopback HTTP(S) bridge."""
+    """Validate an operator-configured egress; credentials require a loopback bridge."""
     error = _classify_proxy_url(url, configured=True)
     if error is not None:
         raise ValueError(error)

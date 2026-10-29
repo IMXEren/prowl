@@ -9,17 +9,19 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
 
 from prowl.browser.config import BrowserConfig
 from prowl.browser.proxy.egress import (
     DEFAULT_EGRESS_NAME,
+    EgressBoundary,
     EgressError,
     EgressPool,
     create_egress_browser,
     derive_egress_paths,
+    parse_egress_boundary,
     parse_egress_spec,
 )
 from prowl.service.app import Service, ServiceConfig
@@ -462,8 +464,15 @@ class EgressConfigTests(IsolatedAsyncioTestCase):
         self.assertEqual(config.egresses, {})
         self.assertEqual(config.proxy_url, _EGRESS_URL)
 
-    async def test_egress_with_embedded_credentials_is_rejected(self) -> None:
+    async def test_authenticated_socks5_egress_is_accepted_without_exposing_credentials(self) -> None:
         env = {"PROWL_EGRESSES": "decodo=socks5://user:secret@127.0.0.1:1080"}
+        with patch.dict("os.environ", env, clear=True):
+            config = ServiceConfig.from_env()
+        self.assertIn("decodo", config.egresses)
+        self.assertNotIn("secret", repr(config))
+
+    async def test_authenticated_socks5_requires_an_explicit_port(self) -> None:
+        env = {"PROWL_EGRESSES": "decodo=socks5://user:secret@127.0.0.1"}
         with patch.dict("os.environ", env, clear=True), self.assertRaises(EgressError) as ctx:
             ServiceConfig.from_env()
         self.assertIn("decodo", str(ctx.exception))
@@ -486,7 +495,31 @@ class EgressConfigTests(IsolatedAsyncioTestCase):
 
     async def test_service_rejects_an_unusable_egress_url(self) -> None:
         with self.assertRaises(ValueError):
-            Service(_config(egresses={"decodo": "socks5://user:secret@127.0.0.1:1080"}), FakeBackend())
+            Service(_config(egresses={"decodo": "socks5://user:secret@127.0.0.1"}), FakeBackend())
+
+
+class EgressBoundaryTests(TestCase):
+    def test_default_and_explicit_boundary(self) -> None:
+        self.assertIs(ServiceConfig().egress_boundary, EgressBoundary.PROCESS)
+        self.assertIs(parse_egress_boundary("CONTEXT"), EgressBoundary.CONTEXT)
+        with patch.dict("os.environ", {"PROWL_EGRESS_BOUNDARY": "CONTEXT"}, clear=True):
+            self.assertIs(ServiceConfig.from_env().egress_boundary, EgressBoundary.CONTEXT)
+
+    def test_invalid_boundary_fails_configuration(self) -> None:
+        with self.assertRaisesRegex(ValueError, "PROWL_EGRESS_BOUNDARY"):
+            ServiceConfig(egress_boundary=cast("EgressBoundary", "tab"))
+
+    def test_context_boundary_rejects_socks4_before_creating_a_browser(self) -> None:
+        async def close_http(_context: Any) -> None:
+            pass
+
+        with self.assertRaisesRegex(EgressError, "SOCKS4"):
+            EgressPool(
+                BrowserConfig(),
+                {"one": "socks4://127.0.0.1:1080"},
+                boundary=EgressBoundary.CONTEXT,
+                close_http_context=close_http,
+            )
 
 
 class EgressSelectionTests(IsolatedAsyncioTestCase):

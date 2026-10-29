@@ -14,7 +14,6 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar
-from urllib.parse import urlsplit
 
 from cloakbrowser import ensure_binary, launch_persistent_context_async
 from loguru import logger
@@ -37,7 +36,7 @@ from prowl.browser.extensions import extension_launch_arguments
 from prowl.browser.fingerprint import FingerprintManager
 from prowl.browser.policies import apply_managed_policies
 from prowl.browser.profile import SearchEngineInjector
-from prowl.browser.proxy.bridge import BrowserProxyBridge, BrowserProxyBridgeError
+from prowl.browser.proxy.bridge import BrowserProxyBridge, BrowserProxyBridgeError, configured_proxy_bridge
 from prowl.shutdown import CoordinatorStateError, RegistrationToken, get_coordinator
 
 if TYPE_CHECKING:
@@ -57,20 +56,10 @@ class BrowserShutdownState(enum.Enum):
 
 
 def _validate_proxy_launch(proxy_url: str | None) -> BrowserProxyBridge | None:
-    if proxy_url is None:
-        return None
     try:
-        proxy = urlsplit(proxy_url)
-        authenticated = proxy.username is not None or proxy.password is not None
-    except ValueError:
-        msg = "invalid browser proxy configuration"
-        raise BrowserStartError(msg) from None
-    if not authenticated:
-        return None
-    try:
-        return BrowserProxyBridge(proxy_url)
+        return configured_proxy_bridge(proxy_url)
     except BrowserProxyBridgeError:
-        msg = "invalid authenticated browser proxy configuration"
+        msg = "invalid browser proxy configuration"
         raise BrowserStartError(msg) from None
 
 

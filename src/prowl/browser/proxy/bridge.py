@@ -1,4 +1,4 @@
-"""Loopback relay that carries client traffic through an authenticated upstream HTTP(S) proxy.
+"""Loopback relay that carries client traffic through an authenticated upstream proxy.
 
 The bridge binds ``127.0.0.1:0`` and offers a *credential-free* local endpoint: an upstream URL
 carrying a username and password is stored only in memory, and every outbound request attaches the
@@ -7,8 +7,9 @@ ever placed in the local URL, ``repr``, or an error message.
 
 One request is served per client connection. A ``CONNECT`` request opens an upstream tunnel and then
 copies bytes in both directions; an ordinary absolute-form HTTP request is forwarded to the upstream
-proxy and its response is streamed back without buffering the body. Any framing this relay cannot
-reproduce safely (a chunked request body, a client-supplied ``Proxy-Authorization``) is rejected
+proxy, or tunneled through an upstream SOCKS5 connection, and its response is streamed back
+without buffering the body. Any framing this relay cannot reproduce safely (a chunked request
+body, a client-supplied ``Proxy-Authorization``) is rejected
 rather than guessed at.
 """
 
@@ -17,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import ipaddress
 import ssl
 from dataclasses import dataclass
 from typing import Final
@@ -31,6 +33,7 @@ __all__ = [
     "MAX_BRIDGE_HEADER_BYTES",
     "BrowserProxyBridge",
     "BrowserProxyBridgeError",
+    "configured_proxy_bridge",
 ]
 
 #: Largest accepted request head, including its terminating CRLFCRLF.
@@ -53,6 +56,10 @@ CLOSE_SECONDS: Final[float] = 5.0
 
 #: Bytes copied per relay read.
 _CHUNK: Final[int] = 64 * 1024
+_SOCKS_BYTE_MAX: Final[int] = 255
+_SOCKS_IPV4: Final[int] = 0x01
+_SOCKS_DOMAIN: Final[int] = 0x03
+_SOCKS_IPV6: Final[int] = 0x04
 
 _HEAD_END: Final[bytes] = b"\r\n\r\n"
 _CR: Final[int] = 0x0D
@@ -91,7 +98,7 @@ _ASCII_LIMIT: Final[int] = 0x80
 
 #: Fixed, credential-free construction-failure messages.
 _INVALID_PROXY_URL: Final[str] = "invalid upstream proxy URL"
-_UNSUPPORTED_PROXY_SCHEME: Final[str] = "upstream proxy URL must use http or https"
+_UNSUPPORTED_PROXY_SCHEME: Final[str] = "upstream proxy URL must use http, https, or socks5"
 _MISSING_PROXY_CREDENTIALS: Final[str] = "upstream proxy URL requires a username and password"
 _PROXY_URL_HAS_PATH: Final[str] = "upstream proxy URL must not carry a path, query, or fragment"
 
@@ -151,10 +158,10 @@ class _RejectedError(Exception):
 
 
 class BrowserProxyBridge:
-    """One loopback listener that forwards client traffic through an authenticated upstream proxy.
+    """One loopback listener that forwards client traffic through an upstream proxy.
 
-    Constructed from an ``http://`` or ``https://`` upstream URL whose userinfo is URL-decoded before
-    it becomes Basic credentials. For an ``https`` upstream the upstream TLS session is verified with
+    Constructed from an ``http://``, ``https://``, or ``socks5://`` upstream URL whose userinfo is
+    URL-decoded before authentication. For an ``https`` upstream the TLS session is verified with
     the default context unless an explicit ``ssl_context`` is injected; verification is never
     disabled. ``start`` binds ``host:port`` (``0`` selects a free local port, exposed through
     :attr:`listen_url`) and ``aclose`` stops the listener and cancels every owned connection.
@@ -168,7 +175,14 @@ class BrowserProxyBridge:
     ) -> None:
         scheme, username, password, upstream_host, upstream_port = _parse_proxy_url(proxy_url)
         self._scheme = scheme
-        self._auth = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+        self._auth = base64.b64encode(f"{username}:{password}".encode()).decode("ascii") if scheme != "socks5" else ""
+        self._socks_auth = (
+            (username.encode(), password.encode())
+            if scheme == "socks5" and username is not None and password is not None
+            else None
+        )
+        if self._socks_auth is not None and any(not 1 <= len(value) <= _SOCKS_BYTE_MAX for value in self._socks_auth):
+            raise BrowserProxyBridgeError(_INVALID_PROXY_URL)
         self._upstream_host = upstream_host
         self._upstream_port = upstream_port
         self._ssl_context = ssl_context
@@ -265,27 +279,33 @@ class BrowserProxyBridge:
         except ProxyProtocolError:
             raise _RejectedError(400) from None
         self._reject_client_auth(head.headers)
-        upstream_reader, upstream_writer = await self._open_upstream()
+        upstream_reader, upstream_writer = (
+            await self._open_socks_destination(host, port) if self._scheme == "socks5" else await self._open_upstream()
+        )
         try:
-            connect_head = (
-                f"CONNECT {host}:{port} HTTP/1.1\r\n"
-                f"Host: {host}:{port}\r\n"
-                f"Proxy-Authorization: Basic {self._auth}\r\n"
-                "\r\n"
-            )
-            try:
-                async with asyncio.timeout(HANDSHAKE_SECONDS):
-                    upstream_writer.write(connect_head.encode("ascii"))
-                    await upstream_writer.drain()
-            except TimeoutError:
-                raise _RejectedError(502) from None
-            if await _read_upstream_status(upstream_reader) != _HTTP_OK:
-                raise _RejectedError(502)
+            if self._scheme != "socks5":
+                await self._send_connect_head(upstream_reader, upstream_writer, host, port)
             client_writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
             await client_writer.drain()
             await _pump_both(client_reader, client_writer, upstream_reader, upstream_writer)
         finally:
             await _close_writer(upstream_writer)
+
+    async def _send_connect_head(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str, port: int
+    ) -> None:
+        """Authenticate a CONNECT request with an upstream HTTP(S) proxy."""
+        connect_head = (
+            f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\nProxy-Authorization: Basic {self._auth}\r\n\r\n"
+        )
+        try:
+            async with asyncio.timeout(HANDSHAKE_SECONDS):
+                writer.write(connect_head.encode("ascii"))
+                await writer.drain()
+        except TimeoutError:
+            raise _RejectedError(502) from None
+        if await _read_upstream_status(reader) != _HTTP_OK:
+            raise _RejectedError(502)
 
     async def _http(
         self, client_reader: asyncio.StreamReader, client_writer: asyncio.StreamWriter, head: _Head
@@ -296,11 +316,15 @@ class BrowserProxyBridge:
         length = _body_length(head.headers)
         if length is not None and length > MAX_BRIDGE_BODY_BYTES:
             raise _RejectedError(413)
-        upstream_reader, upstream_writer = await self._open_upstream()
+        upstream_reader, upstream_writer = (
+            await self._open_socks_destination(parts.hostname or "", parts.port or _DEFAULT_HTTP_PORT)
+            if self._scheme == "socks5"
+            else await self._open_upstream()
+        )
         try:
             try:
                 async with asyncio.timeout(HANDSHAKE_SECONDS):
-                    upstream_writer.write(_upstream_request_head(head, parts, self._auth))
+                    upstream_writer.write(_upstream_request_head(head, parts, self._auth or None))
                     await upstream_writer.drain()
             except TimeoutError:
                 raise _RejectedError(502) from None
@@ -319,6 +343,40 @@ class BrowserProxyBridge:
         """
         if any(name == "proxy-authorization" for name, _ in headers):
             raise _RejectedError(_PROXY_AUTH_REQUIRED)
+
+    async def _open_socks_destination(self, host: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        """Authenticate with SOCKS5 and connect to a destination without local DNS resolution."""
+        reader, writer = await self._open_upstream()
+        try:
+            destination = _socks_address(host)
+            async with asyncio.timeout(HANDSHAKE_SECONDS):
+                method = 2 if self._socks_auth is not None else 0
+                writer.write(bytes((5, 1, method)))
+                await writer.drain()
+                if await reader.readexactly(2) != bytes((5, method)):
+                    raise _RejectedError(502)
+                if self._socks_auth is not None:
+                    username, password = self._socks_auth
+                    writer.write(b"\x01" + bytes((len(username),)) + username + bytes((len(password),)) + password)
+                    await writer.drain()
+                    if await reader.readexactly(2) != b"\x01\x00":
+                        raise _RejectedError(502)
+                writer.write(b"\x05\x01\x00" + destination + port.to_bytes(2, "big"))
+                await writer.drain()
+                version, status, _, kind = await reader.readexactly(4)
+                if (version, status) != (5, 0):
+                    raise _RejectedError(502)
+                if kind == _SOCKS_DOMAIN:
+                    size = (await reader.readexactly(1))[0]
+                elif kind in {_SOCKS_IPV4, _SOCKS_IPV6}:
+                    size = 4 if kind == _SOCKS_IPV4 else 16
+                else:
+                    raise _RejectedError(502)
+                await reader.readexactly(size + 2)
+        except (OSError, asyncio.IncompleteReadError, TimeoutError, UnicodeError, ValueError, _RejectedError):
+            await _close_writer(writer)
+            raise _RejectedError(502) from None
+        return reader, writer
 
     async def _open_upstream(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         """Open the verified upstream connection, honoring the configured scheme.
@@ -342,11 +400,36 @@ class BrowserProxyBridge:
             raise _RejectedError(502) from None
 
 
-def _parse_proxy_url(proxy_url: str) -> tuple[str, str, str, str, int]:
-    """Split an authenticated upstream proxy URL into scheme, credentials, host, and port.
+def _socks_address(host: str) -> bytes:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        name = host.encode("idna")
+    else:
+        kind = _SOCKS_IPV4 if isinstance(address, ipaddress.IPv4Address) else _SOCKS_IPV6
+        return bytes((kind,)) + address.packed
+    if not 1 <= len(name) <= _SOCKS_BYTE_MAX:
+        msg = "invalid SOCKS5 destination"
+        raise ValueError(msg)
+    return bytes((_SOCKS_DOMAIN, len(name))) + name
 
-    :raises BrowserProxyBridgeError: for a URL that is not an ``http``/``https`` proxy with a
-        username and password; the offending URL is never echoed.
+
+def configured_proxy_bridge(proxy_url: str | None) -> BrowserProxyBridge | None:
+    """Bridge all SOCKS5 proxies and authenticated HTTP(S) proxies."""
+    if proxy_url is None:
+        return None
+    try:
+        parts = urlsplit(proxy_url)
+        authenticated = parts.username is not None or parts.password is not None
+    except ValueError:
+        raise BrowserProxyBridgeError(_INVALID_PROXY_URL) from None
+    return BrowserProxyBridge(proxy_url) if authenticated or parts.scheme.lower() == "socks5" else None
+
+
+def _parse_proxy_url(proxy_url: str) -> tuple[str, str | None, str | None, str, int]:
+    """Split an upstream URL; SOCKS5 may omit credentials, HTTP(S) may not.
+
+    :raises BrowserProxyBridgeError: for malformed or unsupported URLs; the URL is never echoed.
     """
     try:
         parts = urlsplit(proxy_url)
@@ -354,22 +437,25 @@ def _parse_proxy_url(proxy_url: str) -> tuple[str, str, str, str, int]:
     except ValueError:
         raise BrowserProxyBridgeError(_INVALID_PROXY_URL) from None
     scheme = parts.scheme.lower()
-    if scheme not in _DEFAULT_PORTS:
+    if scheme not in _DEFAULT_PORTS and scheme != "socks5":
         raise BrowserProxyBridgeError(_UNSUPPORTED_PROXY_SCHEME)
     if parts.hostname is None:
         raise BrowserProxyBridgeError(_INVALID_PROXY_URL)
-    if parts.username is None or parts.password is None or not parts.username:
+    authenticated = parts.username is not None or parts.password is not None
+    if (scheme != "socks5" or authenticated) and (not parts.username or parts.password is None):
         raise BrowserProxyBridgeError(_MISSING_PROXY_CREDENTIALS)
-    if port is not None and not _MIN_PORT <= port <= _MAX_PORT:
+    if (scheme == "socks5" and authenticated and port is None) or (
+        port is not None and not _MIN_PORT <= port <= _MAX_PORT
+    ):
         raise BrowserProxyBridgeError(_INVALID_PROXY_URL)
     if parts.path or parts.query or parts.fragment:
         raise BrowserProxyBridgeError(_PROXY_URL_HAS_PATH)
     return (
         scheme,
-        unquote(parts.username),
-        unquote(parts.password),
+        unquote(parts.username) if parts.username is not None else None,
+        unquote(parts.password) if parts.password is not None else None,
         parts.hostname,
-        _DEFAULT_PORTS[scheme] if port is None else port,
+        (_DEFAULT_PORTS.get(scheme, 1080) if port is None else port),
     )
 
 
@@ -495,17 +581,15 @@ def _body_length(headers: tuple[tuple[str, str], ...]) -> int | None:
     return int(raw[0])
 
 
-def _upstream_request_head(head: _Head, parts: SplitResult, auth: str) -> bytes:
-    """Serialize the forwarded request head: original line, safe fields, and this relay's auth."""
+def _upstream_request_head(head: _Head, parts: SplitResult, auth: str | None) -> bytes:
+    """Serialize safe request fields; only HTTP(S) upstreams receive proxy authentication."""
     port = parts.port
     host = parts.hostname or ""
     host_value = f"{host}:{port}" if port is not None and port != _DEFAULT_HTTP_PORT else host
-    lines = [
-        f"{head.method} {head.target} HTTP/1.1",
-        f"Host: {host_value}",
-        f"Proxy-Authorization: Basic {auth}",
-        "Connection: close",
-    ]
+    target = head.target if auth is not None else (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    lines = [f"{head.method} {target} HTTP/1.1", f"Host: {host_value}", "Connection: close"]
+    if auth is not None:
+        lines.append(f"Proxy-Authorization: Basic {auth}")
     for name, value in head.headers:
         if name in _DROPPED_HEADERS:
             continue

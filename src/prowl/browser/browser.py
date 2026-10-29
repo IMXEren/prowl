@@ -167,6 +167,7 @@ class Browser:
         session_id: str | None = None,
         *,
         storage_state: StorageState | None = None,
+        proxy_server: str | None = None,
     ) -> BrowserContextHandle:
         """Return this browser's context handle for *session_id*.
 
@@ -186,15 +187,18 @@ class Browser:
             if storage_state is not None:
                 msg = "The shared persistent context does not accept supplied storage state."
                 raise BrowserContextError(msg)
+            if proxy_server is not None:
+                msg = "The shared persistent context does not accept a proxy override."
+                raise BrowserContextError(msg)
             return cls._runtime.shared_context()
         if cls._lifecycle.shutdown_state is BrowserShutdownState.IN_PROGRESS:
             msg = "Browser is shutting down - cannot create new contexts."
             raise BrowserStartError(msg)
         if not cls.is_running():
             await cls.start()
-        if storage_state is None:
+        if storage_state is None and proxy_server is None:
             return await cls._runtime.isolated_context(session_id)
-        return await cls._runtime.isolated_context(session_id, storage_state=storage_state)
+        return await cls._runtime.isolated_context(session_id, storage_state=storage_state, proxy_server=proxy_server)
 
     @classmethod
     async def close_context(cls: type[Self], session_id: str, *, evicted: bool = False) -> None:

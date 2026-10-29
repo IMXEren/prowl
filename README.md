@@ -31,8 +31,8 @@ The browser core uses Playwright and PyDoll/CloakBrowser for rendering and input
 The default egress's browser runs from the configured persistent Chrome profile directory
 (`PROWL_PROFILE_DIR`, `/state/profile` in Docker), packed on shutdown into
 `PROWL_PROFILE_ARCHIVE` (`/state/browser-profile.zip` in Docker) on the same writable
-`prowl-state` volume. Each egress named in `PROWL_EGRESSES` gets its own browser with its own
-profile directory beside that one (`/state/profile-<name>`) and its own archive beside that one
+`prowl-state` volume. By default, each egress named in `PROWL_EGRESSES` gets its own browser,
+with a profile beside the default (`/state/profile-<name>`) and an archive beside it
 (`/state/browser-profile-<name>.zip`). Profile trees and archives are checked for cross-identity
 collisions at configuration time. Existing nested profiles require an owner-run migration with
 Prowl stopped before using this layout; see [profile ownership](docs/identity-profiles.md).
@@ -145,16 +145,26 @@ serves one request and closes; intercepted requests cannot escape the CONNECT au
 
 ## Egress / proxy
 
-Each browser identity has its own profile and egress. `PROWL_PROXY_URL` configures the
-process-wide egress, named `default`. Unauthenticated URLs become Chromium proxy
-arguments; authenticated HTTP(S) upstreams use a private loopback bridge, so Chromium
-receives only a credential-free local proxy argument.
+`PROWL_PROXY_URL` configures the default egress. By default, each named egress has its
+own browser process and profile. Authenticated HTTP(S) and all SOCKS5 upstreams use
+private HTTP loopback bridges, so Chromium never receives credentials. Unauthenticated
+HTTP(S) and SOCKS4 use Chromium's native proxy setting.
 
 `PROWL_EGRESSES` adds more egresses as a comma separated `name=url` list, for example
 `PROWL_EGRESSES=one=http://127.0.0.1:8081,two=http://127.0.0.1:8082`. Each named
-egress owns its own browser process, profile directory, and profile archive, so it keeps
-its own warm trust, cookies, and clearance. Names are limited to letters, digits, dot,
-dash, and underscore, because they become path components, and `default` is reserved for
+egress owns its own browser process, profile directory, and profile archive by default.
+`PROWL_EGRESS_BOUNDARY=context` instead puts named egresses in isolated contexts in the
+default browser process. Each context uses its configured proxy; HTTP requests use the same
+upstream with remote DNS for SOCKS5. Named contexts have separate cookies and storage but
+share browser-level characteristics. SOCKS4 is unsupported in context mode. When
+`PROWL_SESSION_STATE_DIR` is configured, each named shared context saves cookies, localStorage,
+and IndexedDB on retirement or orderly shutdown and restores them on next use. Isolated
+sessions use the same store with separate files. Without it, named shared state is lost on
+retirement. Per-egress Chromium profile preferences and extensions cannot be stored in
+context snapshots. Named profile archives are neither loaded nor changed in context mode.
+The default `process` mode keeps the existing per-egress profiles and archives. Names are
+limited to letters, digits, dot,
+dash, and underscore, because they become path components; `default` is reserved for
 `PROWL_PROXY_URL`.
 
 A request selects an egress with `proxy`:
@@ -169,18 +179,20 @@ to one egress. A session on one egress is never silently served by another: a la
 naming a different egress fails.
 
 Anything else is rejected deterministically, and an unlisted URL or an unknown name is
-reported without echoing a URL. A named egress browser starts on first use and is shut down
-after `PROWL_EGRESS_IDLE_SECONDS` without work (default `300`), so an egress nothing is using
-costs no memory. A logical session is bound to the egress of its first use, so a request
-naming a different egress for the same session fails instead of silently mixing the two.
+reported without echoing a URL. A named egress starts on first use and is retired after
+`PROWL_EGRESS_IDLE_SECONDS` without work (default `300`). In process mode this shuts down
+its browser; in context mode it closes its context and loopback bridge. A logical session
+is bound to the egress of its first use. A request naming another egress for that session fails.
 
-Authenticated HTTP(S) upstream credentials remain in the browser identity's process memory.
-The loopback bridge injects proxy authentication upstream and tunnels HTTPS without
-intercepting TLS or changing browser trust. It binds only to `127.0.0.1`, closes with its
-owning browser, and does not include the upstream URL in Chromium arguments or responses.
-Authenticated SOCKS is not supported. Select authenticated egresses with `proxy.name`;
-never send their credentials in a request. Do not put credential-bearing operator settings
-in tracked files.
+Authenticated HTTP(S) and SOCKS5 upstream credentials remain in the service process memory.
+The loopback bridge authenticates upstream and tunnels HTTPS without intercepting TLS or
+changing browser trust. It binds only to `127.0.0.1`, closes with its owning egress, and
+does not include the upstream URL in Chromium settings or responses.
+Authenticated SOCKS5 requires an explicit port. All SOCKS5 browser traffic uses the
+loopback HTTP-to-SOCKS5 bridge because direct SOCKS5 proxy settings did not keep Chromium
+contexts isolated. HTTP requests use the same SOCKS5 upstream with remote DNS. Select
+authenticated egresses with `proxy.name`; never send credentials in a request. Do not put
+credential-bearing operator settings in tracked files.
 
 ## HTTP API (FlareSolverr v1 subset)
 

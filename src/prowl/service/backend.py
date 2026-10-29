@@ -44,7 +44,9 @@ from prowl.browser.proxy.cookies import CookieHeaderError, request_cookie_update
 from prowl.browser.proxy.egress import (
     DEFAULT_EGRESS_IDLE_SECONDS,
     DEFAULT_EGRESS_NAME,
+    EgressBoundary,
     EgressPool,
+    parse_egress_boundary,
 )
 from prowl.browser.solvers.reserved import ReservedCaptcha
 from prowl.service.browser_http import BrowserHttpClients
@@ -339,6 +341,7 @@ class BrowserBackend:
         *,
         egresses: Mapping[str, str] | None = None,
         egress_idle_seconds: float = DEFAULT_EGRESS_IDLE_SECONDS,
+        egress_boundary: EgressBoundary = EgressBoundary.PROCESS,
         interactive_idle_seconds: float = DEFAULT_INTERACTIVE_IDLE_SECONDS,
         steal_least_recent: bool | None = None,
         max_concurrency: int = 0,
@@ -346,11 +349,22 @@ class BrowserBackend:
         state_store: ContextStateStore | None = None,
         vision_settings: VisionSettings | None = None,
     ) -> None:
-        self._browser_config = browser_config
+        egress_boundary = parse_egress_boundary(egress_boundary)
+        base_config = browser_config or BrowserConfig()
+        self._browser_config = (
+            replace(base_config, max_contexts=base_config.max_contexts * (len(egresses or {}) + 1))
+            if egress_boundary is EgressBoundary.CONTEXT
+            else browser_config
+        )
+        self._egress_boundary = egress_boundary
+        self._http = BrowserHttpClients()
         self._pool = EgressPool(
-            browser_config or BrowserConfig(),
+            self._browser_config or base_config,
             egresses or {},
             idle_seconds=egress_idle_seconds,
+            boundary=egress_boundary,
+            close_http_context=self._http.close_context if egress_boundary is EgressBoundary.CONTEXT else None,
+            state_store=state_store,
         )
         self._interactive_idle_seconds = max(0.0, float(interactive_idle_seconds))
         if steal_least_recent is None:
@@ -375,7 +389,6 @@ class BrowserBackend:
         #: Identity-matched HTTP clients for the live native contexts of the ``http`` and
         #: ``auto`` fetch modes. The manager owns only the HTTP sessions; the backend owns the
         #: native contexts and closures this class already owns.
-        self._http = BrowserHttpClients()
         #: Fixed-shape counters and timings this backend updates as requests run. A caller may
         #: supply its own instance so several backends can report into one process's registry.
         self.metrics = metrics if metrics is not None else Metrics()
@@ -927,9 +940,10 @@ class BrowserBackend:
         browser was launched with, never an inferred one, so the fast path cannot leave through a
         different address than the browser for the same identity.
         """
-        if egress == DEFAULT_EGRESS_NAME:
-            return owner.proxy_url()
-        return self._pool.definition(egress).proxy_url
+        proxy = owner.proxy_url() if egress == DEFAULT_EGRESS_NAME else self._pool.definition(egress).proxy_url
+        if proxy is not None and proxy.lower().startswith("socks5://"):
+            return f"socks5h://{proxy[len('socks5://') :]}"
+        return proxy
 
     async def _quit_group(self, group: Any, body_error: BaseException | None) -> None:
         """Close a request group, reporting a close failure unless the request already failed.
@@ -1388,16 +1402,30 @@ class BrowserBackend:
             failure = failure or exc
         failure = failure or vision_failure
         try:
-            await Browser.shutdown()
-        except Exception as exc:  # noqa: BLE001
+            owners_failure = await self._close_browser_owners()
+        except Exception as exc:  # noqa: BLE001 - keep the browser alive if named context cleanup fails
             failure = failure or exc
-            logger.warning(f"Failed to shut the browser down: {type(exc).__name__}")
-        try:
-            await self._pool.aclose()
-        except Exception as exc:  # noqa: BLE001
-            failure = failure or exc
+        else:
+            failure = failure or owners_failure
         if failure is not None:
             raise failure
+
+    async def _close_browser_owners(self) -> BaseException | None:
+        """Close named contexts before the shared process; retain the process on failed cleanup."""
+        if self._egress_boundary is EgressBoundary.CONTEXT:
+            await self._pool.aclose()
+        failure: BaseException | None = None
+        try:
+            await Browser.shutdown()
+        except Exception as exc:  # noqa: BLE001
+            failure = exc
+            logger.warning(f"Failed to shut the browser down: {type(exc).__name__}")
+        if self._egress_boundary is EgressBoundary.PROCESS:
+            try:
+                await self._pool.aclose()
+            except Exception as exc:  # noqa: BLE001
+                failure = failure or exc
+        return failure
 
     async def _close_vision(self) -> BaseException | None:
         """Close the shared VLM client before the browser, retaining it on failure."""

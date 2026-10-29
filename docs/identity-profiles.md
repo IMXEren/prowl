@@ -1,6 +1,8 @@
 # Browser profiles
 
-Each egress has its own browser process, persistent profile, and archive. Sessions on the same egress share that browser identity; an isolated session has separate browsing state, not a different proxy or fingerprint.
+By default, each egress has its own browser process, persistent profile, and archive. Sessions on the same egress share that browser identity; an isolated session has separate browsing state, not a different proxy or fingerprint.
+
+`PROWL_EGRESS_BOUNDARY=context` is opt-in. Named egresses then use separate contexts and proxies within the default browser process, rather than their own persistent profiles. They share browser-level characteristics and are not separate device identities. SOCKS4 is not supported in context mode. Existing named profile directories and archives are not read or modified in this mode. `PROWL_EGRESS_BOUNDARY=process` restores the default behavior.
 
 ## Storage layout
 
@@ -15,13 +17,15 @@ These are the Docker paths. Outside Docker, the defaults are `/tmp/browser-profi
 
 Profiles must not overlap or contain one another. Archives must be separate from all profile trees and from one another. Prowl rejects conflicting paths when loading the egress configuration.
 
-On startup, Prowl restores an archive if the profile directory is empty. Otherwise it uses the existing profile. On shutdown, it packs the profile, excluding caches and journals.
+In process mode, Prowl restores an archive if the profile directory is empty. Otherwise it uses the existing profile. On shutdown, it packs the profile, excluding caches and journals.
 
 Treat profiles and archives as private data: they contain cookies, login state, and browser storage. Keep each profile paired with its egress, and stop Prowl before moving or restoring it.
 
 ## Isolated session state
 
-Shared sessions use the persistent profile. Isolated sessions keep separate cookies and storage inside the same browser process. Their state is discarded when the context closes unless `PROWL_SESSION_STATE_DIR` is configured.
+Shared sessions use the persistent profile in process mode, or the named context in context mode. Isolated sessions keep separate cookies and storage inside the owning browser process. Their state is discarded when the context closes unless `PROWL_SESSION_STATE_DIR` is configured.
+
+In context mode, that directory also saves each named shared context's cookies, localStorage, and IndexedDB on retirement or orderly shutdown and restores them on next use. Without it, named shared state is lost on retirement. Site preferences stored in localStorage persist; per-egress Chromium profile preferences and extensions cannot be stored in context snapshots.
 
 With that setting, Prowl saves isolated state on eviction or orderly shutdown and restores it when the same session ID is recreated on the same egress. Explicitly destroying a session deletes its saved state. This directory needs the same privacy protections as the profiles.
 

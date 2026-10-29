@@ -19,8 +19,10 @@ from __future__ import annotations
 import asyncio
 import re
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
+from urllib.parse import urlsplit
 
 from loguru import logger
 
@@ -28,15 +30,23 @@ from prowl.browser.browser import Browser
 from prowl.browser.config import DEFAULT_MAX_CONTEXTS, PROXY_URL_ENV, BrowserConfig
 from prowl.browser.driver import BrowserRuntimeState
 from prowl.browser.lifecycle import BrowserLifecycle
+from prowl.browser.proxy.context import create_context_egress_browser
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
+
+    from playwright.async_api import BrowserContext as PWBrowserCtx
+
+    from prowl.service.context_state import ContextStateStore
 
 #: Name of the egress configured process-wide by ``PROWL_PROXY_URL``.
 DEFAULT_EGRESS_NAME: Final[str] = "default"
 
 #: Environment variable holding the ``name=url`` list of named egresses.
 EGRESSES_ENV: Final[str] = "PROWL_EGRESSES"
+
+#: Environment variable selecting the named egress ownership boundary.
+EGRESS_BOUNDARY_ENV: Final[str] = "PROWL_EGRESS_BOUNDARY"
 
 #: Environment variable holding how long a named egress may stay idle.
 EGRESS_IDLE_SECONDS_ENV: Final[str] = "PROWL_EGRESS_IDLE_SECONDS"
@@ -62,6 +72,22 @@ _COUNTER_METRICS: Final = (
 
 #: Native gauges summed over only the egresses a pool currently has live.
 _GAUGE_METRICS: Final = ("context_count", "tabgroups_active")
+
+
+class EgressBoundary(StrEnum):
+    """Choose whether named egresses own processes or isolated contexts."""
+
+    PROCESS = "process"
+    CONTEXT = "context"
+
+
+def parse_egress_boundary(raw: str | EgressBoundary) -> EgressBoundary:
+    """Parse the egress ownership boundary without changing the default behavior."""
+    try:
+        return EgressBoundary(raw.strip().lower())
+    except (AttributeError, ValueError):
+        msg = f"{EGRESS_BOUNDARY_ENV} must be process or context"
+        raise ValueError(msg) from None
 
 
 def _owner_resource_metrics(owner: type[Browser]) -> dict[str, int]:
@@ -259,13 +285,22 @@ class EgressPool:
     first use and shut down after ``idle_seconds`` without work.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - egress ownership and optional storage are configured together
         self,
         base_config: BrowserConfig,
         egresses: Mapping[str, str],
         *,
         idle_seconds: float = DEFAULT_EGRESS_IDLE_SECONDS,
+        boundary: EgressBoundary = EgressBoundary.PROCESS,
+        close_http_context: Callable[[PWBrowserCtx], Awaitable[None]] | None = None,
+        state_store: ContextStateStore | None = None,
     ) -> None:
+        self._boundary = parse_egress_boundary(boundary)
+        if self._boundary is EgressBoundary.CONTEXT and close_http_context is None:
+            msg = "context-bound egresses require HTTP context cleanup"
+            raise EgressError(msg)
+        self._close_http_context = close_http_context
+        self._state_store = state_store if self._boundary is EgressBoundary.CONTEXT else None
         self._idle_seconds = max(0.0, float(idle_seconds))
         self._definitions: dict[str, _EgressDefinition] = {}
         owners: list[tuple[Path, Path]] = [
@@ -273,6 +308,9 @@ class EgressPool:
         ]
         for index, name in enumerate(sorted(egresses)):
             _check_egress_name(name)
+            if self._boundary is EgressBoundary.CONTEXT and urlsplit(egresses[name]).scheme.lower() == "socks4":
+                msg = "SOCKS4 egresses are unsupported in context mode"
+                raise EgressError(msg)
             profile_dir, profile_archive = derive_egress_paths(
                 base_config.profile_dir,
                 base_config.profile_archive,
@@ -400,8 +438,16 @@ class EgressPool:
             definition = self.definition(name)
             entry = self._live.get(name)
             if entry is None:
-                entry = _LiveEgress(
-                    browser=create_egress_browser(
+                if self._boundary is EgressBoundary.CONTEXT and self._close_http_context is not None:
+                    browser = create_context_egress_browser(
+                        name=definition.name,
+                        proxy_url=definition.proxy_url,
+                        base_browser=Browser,
+                        close_http_context=self._close_http_context,
+                        state_store=self._state_store,
+                    )
+                else:
+                    browser = create_egress_browser(
                         name=definition.name,
                         proxy_url=definition.proxy_url,
                         profile_dir=definition.profile_dir,
@@ -410,8 +456,8 @@ class EgressPool:
                         extensions_dir=definition.extensions_dir,
                         policy_dir=definition.policy_dir,
                         max_contexts=definition.max_contexts,
-                    ),
-                )
+                    )
+                entry = _LiveEgress(browser=browser)
                 self._live[name] = entry
                 logger.debug(f"Egress {name!r} browser created.")
             if entry.closing:
@@ -555,10 +601,13 @@ __all__ = [
     "DEFAULT_EGRESS_IDLE_SECONDS",
     "DEFAULT_EGRESS_NAME",
     "EGRESSES_ENV",
+    "EGRESS_BOUNDARY_ENV",
     "EGRESS_IDLE_SECONDS_ENV",
+    "EgressBoundary",
     "EgressError",
     "EgressPool",
     "create_egress_browser",
     "derive_egress_paths",
+    "parse_egress_boundary",
     "parse_egress_spec",
 ]

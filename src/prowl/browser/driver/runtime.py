@@ -303,6 +303,7 @@ class BrowserRuntimeState:
         session_id: str,
         *,
         storage_state: StorageState | None = None,
+        proxy_server: str | None = None,
     ) -> BrowserContextHandle:
         """Return the isolated context for *session_id*, creating it on first use.
 
@@ -314,11 +315,11 @@ class BrowserRuntimeState:
         :raises BrowserContextError: for a session id that cannot name a context.
         """
         require_session_id(session_id)
-        if storage_state is None:
+        if storage_state is None and proxy_server is None:
             return await self.contexts.get_or_create(session_id, lambda: self._open_isolated_context(session_id))
         return await self.contexts.get_or_create(
             session_id,
-            lambda: self._open_isolated_context(session_id, storage_state=storage_state),
+            lambda: self._open_isolated_context(session_id, storage_state=storage_state, proxy_server=proxy_server),
         )
 
     async def _open_isolated_context(
@@ -326,6 +327,7 @@ class BrowserRuntimeState:
         session_id: str,
         *,
         storage_state: StorageState | None = None,
+        proxy_server: str | None = None,
     ) -> PWBrowserCtx:
         """Create one isolated context beside the persistent one in this browser.
 
@@ -338,6 +340,8 @@ class BrowserRuntimeState:
             msg = "Playwright browser disconnected."
             raise BrowserError(msg)
         options = persona_context_options(main_ctx)
+        if proxy_server is not None:
+            options["proxy"] = {"server": proxy_server}
         if storage_state is None:
             context = await browser.new_context(**options)
         else:
