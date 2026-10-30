@@ -44,6 +44,7 @@ DEFAULT_EGRESS_NAME: Final[str] = "default"
 
 #: Environment variable holding the ``name=url`` list of named egresses.
 EGRESSES_ENV: Final[str] = "PROWL_EGRESSES"
+EGRESSES_FILE_ENV: Final[str] = "PROWL_EGRESSES_FILE"
 
 #: Environment variable selecting the named egress ownership boundary.
 EGRESS_BOUNDARY_ENV: Final[str] = "PROWL_EGRESS_BOUNDARY"

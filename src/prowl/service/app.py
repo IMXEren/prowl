@@ -39,6 +39,7 @@ from prowl.browser.proxy.egress import (
     EGRESS_BOUNDARY_ENV,
     EGRESS_IDLE_SECONDS_ENV,
     EGRESSES_ENV,
+    EGRESSES_FILE_ENV,
     EgressBoundary,
     EgressError,
     parse_egress_boundary,
@@ -328,7 +329,18 @@ class ServiceConfig:
         proxy_url = os.environ.get(PROXY_URL_ENV, "").strip() or None
         if proxy_url is not None:
             validate_configured_proxy_url(proxy_url)
-        egresses = parse_egress_spec(os.environ.get(EGRESSES_ENV, ""))
+        egress_spec = os.environ.get(EGRESSES_ENV, "")
+        egress_file = os.environ.get(EGRESSES_FILE_ENV, "").strip()
+        if egress_file:
+            if egress_spec.strip():
+                msg = f"Use either {EGRESSES_ENV} or {EGRESSES_FILE_ENV}, not both"
+                raise EgressError(msg)
+            try:
+                egress_spec = Path(egress_file).read_text(encoding="utf-8").strip()
+            except OSError:
+                msg = f"Could not read {EGRESSES_FILE_ENV}"
+                raise EgressError(msg) from None
+        egresses = parse_egress_spec(egress_spec)
         for name in sorted(egresses):
             try:
                 validate_configured_proxy_url(egresses[name])

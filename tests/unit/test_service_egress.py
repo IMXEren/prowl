@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 from unittest import IsolatedAsyncioTestCase, TestCase
 from unittest.mock import patch
@@ -438,6 +439,35 @@ class EgressConfigTests(IsolatedAsyncioTestCase):
         with patch.dict("os.environ", env, clear=True):
             config = ServiceConfig.from_env()
         self.assertEqual(config.egresses, {"decodo": _EGRESS_URL, "warp": _OTHER_URL})
+
+    async def test_egresses_can_be_read_from_a_mounted_secret(self) -> None:
+        with TemporaryDirectory() as directory:
+            secret = Path(directory) / "egresses"
+            secret.write_text("exit-01=socks5://user%3Aname:secret%40key@127.0.0.1:1080", encoding="utf-8")
+            with patch.dict("os.environ", {"PROWL_EGRESSES_FILE": str(secret)}, clear=True):
+                config = ServiceConfig.from_env()
+            self.assertIn("exit-01", config.egresses)
+            self.assertNotIn("secret%40key", repr(config))
+
+    async def test_egress_file_and_environment_are_mutually_exclusive(self) -> None:
+        with (
+            patch.dict(
+                "os.environ",
+                {"PROWL_EGRESSES_FILE": "/absent", "PROWL_EGRESSES": "exit-01=socks5://user:secret@127.0.0.1:1080"},
+                clear=True,
+            ),
+            self.assertRaises(EgressError) as ctx,
+        ):
+            ServiceConfig.from_env()
+        self.assertNotIn("secret", str(ctx.exception))
+
+    async def test_missing_egress_file_fails_without_echoing_path(self) -> None:
+        with (
+            patch.dict("os.environ", {"PROWL_EGRESSES_FILE": "/absent/path"}, clear=True),
+            self.assertRaises(EgressError) as ctx,
+        ):
+            ServiceConfig.from_env()
+        self.assertNotIn("/absent/path", str(ctx.exception))
 
     async def test_egress_idle_seconds_is_read(self) -> None:
         env = {"PROWL_EGRESS_IDLE_SECONDS": "12.5"}
