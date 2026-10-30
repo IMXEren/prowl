@@ -1,3 +1,10 @@
+## [2.0.0-dev.13](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.12...v2.0.0-dev.13) (2026-10-30)
+
+### New Features
+
+* **egress:** add context-bound proxy and storage state ([7d01a9b](https://github.com/IMXEren/prowl/commit/7d01a9b9bd1fe808aa249af402f578828de00e63))
+* **egress:** read named contexts from mounted secret ([1793f68](https://github.com/IMXEren/prowl/commit/1793f6828379d96b13a5dbf29eea97d107fd8261))
+
 ## [2.0.0-dev.12](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.11...v2.0.0-dev.12) (2026-10-29)
 
 ### Dependencies
