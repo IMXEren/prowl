@@ -72,7 +72,10 @@ async def _active_challenge_frame_count(page: Page, widget: _CheckboxWidget) -> 
 
         selector = "#rc-imageselect"
     else:
-        from prowl.browser.solvers.vision.hcaptcha import _is_challenge_frame  # noqa: PLC0415 - adapter-only lazy import
+        # Adapter-only lazy import.
+        from prowl.browser.solvers.vision.hcaptcha import (  # noqa: PLC0415
+            _is_challenge_frame,
+        )
 
         selector = ".challenge-view"
     frames = [frame for frame in page.frames if _is_challenge_frame(frame.url)]

@@ -308,7 +308,10 @@ async def solve_geetest_slide(
             if await page.locator(_WIDGET).count() != 1:
                 return _outcome("unsupported", "challenge_unavailable")
             if await page.locator(".geetest_btn_click:visible").count() == 1:
-                from prowl.browser.solvers.vision.geetest_v4 import solve_geetest_v4  # noqa: PLC0415 - v4 shares v3 geometry
+                # v4 shares v3 geometry.
+                from prowl.browser.solvers.vision.geetest_v4 import (  # noqa: PLC0415
+                    solve_geetest_v4,
+                )
 
                 return await solve_geetest_v4(page, seconds_remaining, native_tab=native_tab)
             initial = await _read_tokens(page)
