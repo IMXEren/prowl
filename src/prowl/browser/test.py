@@ -7,13 +7,13 @@ import time
 import turbohtml
 from loguru import logger
 
-from prowl.browser.site import source as page_source
+from prowl.browser.page_handler import load_page
 
 
-async def main(url: str, request_timeout: float) -> None:
+async def main(url: str, request_timeout: int) -> None:
     """Fetch *url* in the browser and print its document title."""
     try:
-        response = await page_source(url, request_timeout)
+        response = await load_page(url, request_timeout)
         document = turbohtml.parse(response.text)
         title = document.select_one("title")
         if title:
@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     """Parse manual-test command-line arguments."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("url", nargs="?", default="https://example.com/")
-    parser.add_argument("--timeout", type=float, default=60.0)
+    parser.add_argument("--timeout", type=int, default=60)
     return parser.parse_args()
 
 
