@@ -41,7 +41,7 @@ class ServiceConfigStateDirTests(TestCase):
 
     def test_appended_field_defaults_to_disabled(self) -> None:
         """The state field retains its positional slot and disabled default."""
-        self.assertEqual([f.name for f in dataclasses.fields(ServiceConfig)].index("session_state_dir"), 15)
+        self.assertEqual([f.name for f in dataclasses.fields(ServiceConfig)].index("session_state_dir"), 16)
         self.assertIsNone(ServiceConfig().session_state_dir)
 
     def test_a_blank_env_value_stays_disabled(self) -> None:

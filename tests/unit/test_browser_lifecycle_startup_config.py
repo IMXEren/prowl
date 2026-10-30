@@ -112,13 +112,13 @@ class BrowserLifecycleStartupTests(IsolatedAsyncioTestCase):
         )
         self.assertFalse(hasattr(request, "ws_url"))
 
-    async def test_authenticated_proxy_is_rejected_before_profile_or_launch(self) -> None:
+    async def test_unsupported_proxy_scheme_is_rejected_before_profile_or_launch(self) -> None:
         self.lifecycle.apply_config(
             BrowserConfig(proxy_url="socks5h://example:secret@proxy.invalid:10001"),
             is_running=lambda: False,
         )
         with (
-            self.assertRaisesRegex(BrowserStartError, "invalid authenticated browser proxy"),
+            self.assertRaisesRegex(BrowserStartError, "invalid browser proxy configuration"),
             patch.object(BrowserLifecycle, "restore_profile_from_archive") as restore,
         ):
             await self._start()

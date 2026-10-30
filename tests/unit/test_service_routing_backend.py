@@ -609,7 +609,7 @@ class HttpProxyTests(_RoutingFixture):
         client = _StubHttpClient(result=_http_result())
         backend, _recorder, clients, _site = self._backend(http_client=client, default_proxy=_DEFAULT_PROXY)
         await backend.fetch(None, _request(mode=HTTP_MODE))
-        self.assertEqual(clients.client_calls[0][1], _DEFAULT_PROXY)
+        self.assertEqual(clients.client_calls[0][1], "socks5h://127.0.0.1:10002")
         await backend.aclose()
 
     async def test_default_egress_without_a_proxy_binds_none(self) -> None:
@@ -623,7 +623,7 @@ class HttpProxyTests(_RoutingFixture):
         client = _StubHttpClient(result=_http_result())
         backend, _recorder, clients, _site = self._backend(http_client=client)
         await backend.fetch(None, _request(mode=HTTP_MODE, egress="decodo"))
-        self.assertEqual(clients.client_calls[0][1], _EGRESS_URL)
+        self.assertEqual(clients.client_calls[0][1], "socks5h://127.0.0.1:10001")
         await backend.aclose()
 
 

@@ -201,6 +201,11 @@ class ExtensionLaunchWiringTests(IsolatedAsyncioTestCase):
         self.lifecycle = BrowserLifecycle(cast("BrowserRuntimeState", self.driver))
         self.primed: list[list[str]] = []
 
+    async def asyncTearDown(self) -> None:
+        """Close the proxy bridge created by the fake browser launch."""
+        if self.lifecycle._proxy_bridge is not None:
+            await self.lifecycle._proxy_bridge.aclose()
+
     async def _start(self) -> _StartResult:
         with (
             patch.object(BrowserLifecycle, "unpack_profile"),
@@ -254,15 +259,13 @@ class ExtensionLaunchWiringTests(IsolatedAsyncioTestCase):
 
         result = await self._start()
 
+        arguments = result["request"].launch_arguments
         self.assertEqual(
-            result["request"].launch_arguments,
-            [
-                "--remote-debugging-port=9999",
-                "--window-size=1920,980",
-                "--window-position=0,0",
-                "--proxy-server=socks5://127.0.0.1:1080",
-            ],
+            arguments[:3],
+            ["--remote-debugging-port=9999", "--window-size=1920,980", "--window-position=0,0"],
         )
+        self.assertRegex(arguments[3], r"^--proxy-server=http://127\.0\.0\.1:\d+$")
+        self.assertEqual(result["prime_arguments"], arguments)
 
     async def test_empty_directory_leaves_the_launch_arguments_unchanged(self) -> None:
         """An empty mounted directory is indistinguishable from none at launch time."""
