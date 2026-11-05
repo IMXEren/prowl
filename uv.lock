@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 
 [[package]]
@@ -447,16 +447,16 @@ wheels = [
 
 [[package]]
 name = "cloakbrowser"
-version = "0.6.4"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
     { name = "playwright" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f5/16/4c5cfa21e46ecf3d41085dd0134955a0a8cf0462c492f346e0d707ed513e/cloakbrowser-0.6.4.tar.gz", hash = "sha256:88773949a1df8a51dd2eb4da79105cd8c76279646fc26233ed820133bdbbb29f", size = 5838770, upload-time = "2026-10-23T20:07:01.586Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/63/b9/4ca765ff174d849d1e7d644a91f5ba539de9ecbecda928afff15a76c36ee/cloakbrowser-0.7.0.tar.gz", hash = "sha256:85b576251f5f758e2ff7e5d386b0b30d62959ac1698b33b3d84bebd81d658159", size = 5841059, upload-time = "2026-11-01T18:19:56.676Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/15/7e/4b6a83ed07504ce371b7e17d488f056b50729a2a1fb9a4cd8583d35ee89d/cloakbrowser-0.6.4-py3-none-any.whl", hash = "sha256:d6d0f988275f20acb1bdc1efa2d4779f46cbcf591269046a28a9b25769cb004f", size = 142532, upload-time = "2026-10-23T20:06:59.397Z" },
+    { url = "https://files.pythonhosted.org/packages/45/9c/192b8f591e5e400146356e633da00be19fb5dda71d2a30abe3698103edf5/cloakbrowser-0.7.0-py3-none-any.whl", hash = "sha256:71def3e5e843a47b4ad4db201b6cc9364844ba949f213e5d5f0d3a7b9d7e162d", size = 137665, upload-time = "2026-11-01T18:19:54.83Z" },
 ]
 
 [package.optional-dependencies]
@@ -1291,7 +1291,7 @@ vision = [
 requires-dist = [
     { name = "aiohttp", specifier = "==3.14.5" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
-    { name = "cloakbrowser", extras = ["geoip"], specifier = "==0.6.4" },
+    { name = "cloakbrowser", extras = ["geoip"], specifier = "==0.7.0" },
     { name = "cryptography", specifier = "==50.0.2" },
     { name = "curl-cffi", specifier = "==0.17.0" },
     { name = "h11", specifier = "==0.16.0" },
