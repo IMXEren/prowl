@@ -8,7 +8,7 @@ from pathlib import Path
 
 from loguru import logger
 
-from prowl.browser.site import source as fetch_source
+from prowl.browser.page_handler import load_page
 from prowl.browser.utils import run_coroutine_sync
 
 EXIT_OK = 0
@@ -36,7 +36,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run_fetch(args: argparse.Namespace) -> int:
     try:
-        page = run_coroutine_sync(fetch_source(args.url, args.timeout))
+        page = run_coroutine_sync(load_page(args.url, args.timeout))
     except Exception as exc:  # noqa: BLE001
         logger.error(f"failed to load {args.url}: {exc}")
         return EXIT_FETCH_FAILED

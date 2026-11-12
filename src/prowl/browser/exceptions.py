@@ -9,6 +9,10 @@ class BrowserStartError(BrowserError):
     """Implies failed to start the browser process."""
 
 
+class BrowserContextError(BrowserError):
+    """Implies the requested browser context is unusable or owned by another identity."""
+
+
 class BrowserTabError(BrowserError):
     """Implies error propagated by the browser's tab."""
 
