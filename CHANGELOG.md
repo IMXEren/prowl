@@ -1,3 +1,14 @@
+## [2.0.0-dev.14](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.13...v2.0.0-dev.14) (2026-11-12)
+
+### Bug Fixes
+
+* **deps:** cap Playwright for CloakBrowser compatibility ([45c54df](https://github.com/IMXEren/prowl/commit/45c54df8a3758ffe66658dafe720f9c118921b2d))
+* **docker:** install dependencies from uv lockfile ([ff65cd7](https://github.com/IMXEren/prowl/commit/ff65cd7a67599dccba62f22d735d120581797e7a))
+
+### Dependencies
+
+* **deps:** enable Docker image updates ([4bf04b6](https://github.com/IMXEren/prowl/commit/4bf04b6e4bce982d0fbe55dd5b52dffdd7ee2b7c))
+
 ## [2.0.0-dev.13](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.12...v2.0.0-dev.13) (2026-10-30)
 
 ### New Features
