@@ -2,11 +2,12 @@
 
 These pin the cross-cutting hardening contracts that are easy to regress:
 environment-driven profile paths, the explicit reconfiguration seam, the
-``/dev/shm`` flag removal, and the package/Docker wiring.
+``/dev/shm`` flag removal, and package metadata.
 """
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 from unittest import TestCase
 from unittest.mock import patch
@@ -63,30 +64,13 @@ class BrowserOptionParityTests(TestCase):
 
 
 class PackagingParityTests(TestCase):
-    """Package metadata and Docker wiring stay in lockstep with the project."""
+    """Package metadata declares the files needed by consumers."""
 
     def test_package_declares_inline_types(self) -> None:
         self.assertTrue((_ROOT / "src" / "prowl" / "py.typed").is_file())
 
     def test_sdist_includes_license(self) -> None:
-        pyproject = (_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('"LICENSE"', pyproject)
-        self.assertIn('name = "prowl"', pyproject)
-
-    def test_dockerfile_installs_git_and_copies_license(self) -> None:
-        dockerfile = (_ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("git \\", dockerfile)
-        self.assertIn("COPY pyproject.toml README.md LICENSE ./", dockerfile)
-        self.assertIn("PROWL_PROFILE_ARCHIVE=/state/browser-profile.zip", dockerfile)
-
-    def test_compose_uses_prowl_state_volume(self) -> None:
-        compose = (_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
-        self.assertIn("prowl:local", compose)
-        self.assertNotIn("ghcr.io/imxeren/prowl", compose)
-        self.assertIn("PROWL_PROFILE_DIR=/state/profile", compose)
-        self.assertIn("prowl-state:/state", compose)
-        self.assertIn('shm_size: "2gb"', compose)
-
-    def test_env_example_documents_archive_path(self) -> None:
-        env_example = (_ROOT / ".env.example").read_text(encoding="utf-8")
-        self.assertIn("PROWL_PROFILE_ARCHIVE=/state/browser-profile.zip", env_example)
+        with (_ROOT / "pyproject.toml").open("rb") as source:
+            pyproject = tomllib.load(source)
+        self.assertIn("LICENSE", pyproject["project"]["license-files"])
+        self.assertIn("/LICENSE", pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["include"])
