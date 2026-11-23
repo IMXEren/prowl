@@ -428,6 +428,21 @@ class StubGroup:
         def __init__(self) -> None:
             self.listeners: dict[str, list[Any]] = {}
             self.main_frame = object()
+            self.has_token = False
+            self.frames: list[Any] = []
+            self.widgets: list[Any] = []
+
+        async def query_selector_all(self, _selector: str) -> list[Any]:
+            return self.widgets
+
+        def is_closed(self) -> bool:
+            return False
+
+        def locator(self, _selector: str) -> StubGroup._StubPage:
+            return self
+
+        async def evaluate_all(self, _expression: str) -> bool:
+            return self.has_token
 
         def on(self, event: str, callback: Any) -> None:
             self.listeners.setdefault(event, []).append(callback)
@@ -963,6 +978,71 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
             self.assertIn("turnstile", solve.call_args.kwargs["provider_attempts"])
             self.assertEqual(await backend.release_reserved_tab(tab), [tab])
             self.assertEqual(page.listeners["domcontentloaded"], [])
+        await backend.aclose()
+
+    async def test_reserved_turnstile_retries_without_frame_navigation_until_token(self) -> None:
+        backend, groups = self._backend()
+        retried = asyncio.Event()
+        calls = 0
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                groups[0].ppage.has_token = True
+                retried.set()
+
+        with (
+            patch("prowl.browser.solvers.reserved._RETRY_SECONDS", 0.01),
+            patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch),
+        ):
+            tab, _target = await backend.reserve_tab()
+            frame = SimpleNamespace(url="https://challenges.cloudflare.com/cdn-cgi/challenge-platform/")
+            groups[0].ppage.frames.append(frame)
+            groups[0].ppage.listeners["framenavigated"][0](frame)
+            await asyncio.wait_for(retried.wait(), 1)
+            await asyncio.sleep(0.03)
+            self.assertEqual(calls, 2)
+            await backend.release_reserved_tab(tab)
+        await backend.aclose()
+
+    async def test_reserved_page_without_captcha_stops_after_initial_scan(self) -> None:
+        backend, groups = self._backend()
+        scanned = asyncio.Event()
+        calls = 0
+
+        async def dispatch(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            scanned.set()
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=dispatch):
+            tab, _target = await backend.reserve_tab()
+            groups[0].ppage.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(scanned.wait(), 1)
+            await asyncio.sleep(0.03)
+            self.assertEqual(calls, 1)
+            await backend.release_reserved_tab(tab)
+        await backend.aclose()
+
+    async def test_reserved_page_error_without_challenge_does_not_retry(self) -> None:
+        backend, groups = self._backend()
+        scanned = asyncio.Event()
+        calls = 0
+
+        async def fail(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal calls
+            calls += 1
+            scanned.set()
+            raise RuntimeError
+
+        with patch("prowl.browser.solvers.reserved.solve_visible_captcha", side_effect=fail):
+            tab, _target = await backend.reserve_tab()
+            groups[0].ppage.listeners["domcontentloaded"][0]()
+            await asyncio.wait_for(scanned.wait(), 1)
+            await asyncio.sleep(0.03)
+            self.assertEqual(calls, 1)
+            await backend.release_reserved_tab(tab)
         await backend.aclose()
 
     async def test_reserved_provider_frame_after_load_restarts_scan(self) -> None:

@@ -26,7 +26,7 @@ from prowl.browser.cookies import Cookie, Cookies
 from prowl.browser.exceptions import JSONExtractError, PageLoadError
 from prowl.browser.headers import HEADER_SCOPE_DOCUMENT, HEADER_SCOPES, normalize_custom_headers
 from prowl.browser.solvers import ChallengeSolver, CloudflareSolver, click_embedded_turnstile, solve_visible_captcha
-from prowl.browser.solvers.cloudflare import find_and_click_turnstile
+from prowl.browser.solvers.cloudflare import TURNSTILE_INPUT_SELECTOR, find_and_click_turnstile
 from prowl.browser.utils import run_coroutine_sync
 from prowl.shutdown import get_process_cancel_token
 from prowl.structures import CaseInsensitiveDict
@@ -106,8 +106,6 @@ class PageResponse:
 
 
 _MEDIA_RESOURCE_TYPES: frozenset[str] = frozenset({"image", "stylesheet", "font"})
-
-_TURNSTILE_INPUT_SELECTOR: str = "input[name='cf-turnstile-response']"
 
 
 class PageHandler:
@@ -359,7 +357,7 @@ class PageHandler:
         """Verify a fresh Turnstile token within the request deadline."""
         async with asyncio.timeout(self.get_time_left()):
             page = self._tg.ppage
-            widget = page.locator(_TURNSTILE_INPUT_SELECTOR)
+            widget = page.locator(TURNSTILE_INPUT_SELECTOR)
             if not await widget.count():
                 return None
             initial: list[str] = await widget.evaluate_all("elements => elements.map(element => element.value)")
@@ -949,7 +947,7 @@ _TURNSTILE_RESPONSE_EXPRESSION = (
 
 _TURNSTILE_TOKEN_EXPRESSION = (
     "initial => {"
-    f" const inputs = document.querySelectorAll({json.dumps(_TURNSTILE_INPUT_SELECTOR)});"
+    f" const inputs = document.querySelectorAll({json.dumps(TURNSTILE_INPUT_SELECTOR)});"
     " for (const input of inputs) {"
     "   if (input.value && !initial.includes(input.value)) return input.value;"
     " }"

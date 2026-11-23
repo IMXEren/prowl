@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from loguru import logger
 
 from prowl.browser.solvers.checkbox import _provider_for_frame
+from prowl.browser.solvers.cloudflare import turnstile_token_present
 from prowl.browser.solvers.dispatch import solve_visible_captcha
 
 if TYPE_CHECKING:
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
     from prowl.browser.page_handler import PageHandler
 
 _RESERVATION_CAPTCHA_SECONDS = 30
+_RETRY_SECONDS = 1
+
+
+def _challenge_frame(url: str) -> bool:
+    host = urlsplit(url).hostname
+    return (
+        host == "challenges.cloudflare.com"
+        or _provider_for_frame(url) is not None
+        or (host is not None and host.endswith(".geetest.com"))
+    )
 
 
 class ReservedCaptcha:
@@ -60,12 +71,7 @@ class ReservedCaptcha:
             if self._attempt is not None:
                 self._attempt.cancel()
             return
-        host = urlsplit(frame.url).hostname
-        if (
-            host == "challenges.cloudflare.com"
-            or _provider_for_frame(frame.url) is not None
-            or (host is not None and host.endswith(".geetest.com"))
-        ):
+        if _challenge_frame(frame.url):
             self._schedule()
 
     def _schedule(self) -> None:
@@ -75,20 +81,42 @@ class ReservedCaptcha:
             self._attempt = asyncio.create_task(self._solve())
 
     async def _solve(self) -> None:
-        self.handler.start = time.perf_counter()
-        self.handler.timeout = _RESERVATION_CAPTCHA_SECONDS
-        try:
-            solved = await solve_visible_captcha(
-                self.page,
-                self.handler.get_time_left,
-                provider_attempts=self.handler._provider_attempts(self.page),  # noqa: SLF001 - reuse fetch dispatch
-            )
-            if solved is not None:
-                logger.debug("Reserved tab solved CAPTCHA ({})", solved[0])
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - solver must not close a caller-owned tab
-            logger.warning("Reserved tab CAPTCHA attempt failed ({})", type(exc).__name__)
+        while self._started and not self.page.is_closed():
+            self.handler.start = time.perf_counter()
+            self.handler.timeout = _RESERVATION_CAPTCHA_SECONDS
+            try:
+                if await turnstile_token_present(self.page):
+                    logger.debug("Reserved tab already holds a Turnstile token")
+                    return
+                solved = await solve_visible_captcha(
+                    self.page,
+                    self.handler.get_time_left,
+                    provider_attempts=self.handler._provider_attempts(self.page),  # noqa: SLF001 - reuse fetch dispatch
+                )
+                if solved is not None:
+                    logger.debug("Reserved tab solved CAPTCHA ({})", solved[0])
+                    return
+                if not await self._challenge_present():
+                    logger.debug("Reserved tab has no visible CAPTCHA")
+                    return
+                logger.debug("Reserved tab CAPTCHA attempt produced no token; retrying")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - solver must not close a caller-owned tab
+                logger.warning("Reserved tab CAPTCHA attempt failed ({})", type(exc).__name__)
+                if not await self._challenge_present():
+                    return
+            await asyncio.sleep(_RETRY_SECONDS)
+
+    async def _challenge_present(self) -> bool:
+        if any(_challenge_frame(frame.url) for frame in self.page.frames):
+            return True
+        if await self.page.query_selector_all("altcha-widget,.frc-captcha"):
+            return True
+        for widget in await self.page.query_selector_all(".geetest_holder"):
+            if await widget.is_visible():
+                return True
+        return False
 
     async def stop(self) -> None:
         """Remove this tab's listeners and stop any in-flight attempt before closing it."""

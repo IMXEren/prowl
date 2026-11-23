@@ -8,12 +8,22 @@ response and the loaded DOM remain the authority on success.
 from typing import Protocol
 from urllib.parse import urlsplit
 
+from loguru import logger
 from playwright.async_api import ElementHandle, Locator, Page
 from pydoll.browser.tab import Tab
 from pydoll.commands.dom_commands import DomCommands
 from pydoll.commands.target_commands import TargetCommands
 from pydoll.elements.web_element import WebElement
 from pydoll.protocol.dom.types import Node as PDNode
+
+TURNSTILE_INPUT_SELECTOR = "input[name='cf-turnstile-response']"
+
+
+async def turnstile_token_present(page: Page) -> bool:
+    """Check the selected page's response inputs without exposing token values."""
+    return await page.locator(TURNSTILE_INPUT_SELECTOR).evaluate_all(
+        "elements => elements.some(element => Boolean(element.value))"
+    )
 
 
 class ChallengeSolver(Protocol):
@@ -120,6 +130,7 @@ async def find_and_click_turnstile(page: Page, timeout_ms: float) -> bool:
                 if await checkbox.is_visible():
                     candidates.append((element, checkbox))
         if len(candidates) != 1:
+            logger.debug("Turnstile checkbox candidates: {}", len(candidates))
             return False
         element, checkbox = candidates[0]
         width = await element.evaluate(
@@ -128,6 +139,7 @@ async def find_and_click_turnstile(page: Page, timeout_ms: float) -> bool:
         try:
             await element.evaluate("node => node.style.setProperty('width', '300px', 'important')")
             await checkbox.click(timeout=timeout_ms)
+            logger.debug("Turnstile checkbox clicked")
             return True
         finally:
             await element.evaluate(
