@@ -35,10 +35,13 @@ ENV CLOAKBROWSER_AUTO_UPDATE="false" \
     PROWL_PROFILE_ARCHIVE=/state/browser-profile.zip \
     PIP_NO_CACHE_DIR=1
 
+COPY --from=ghcr.io/astral-sh/uv:0.13.6 /uv /usr/local/bin/uv
+ENV PATH="/app/.venv/bin:$PATH"
+
 WORKDIR /app
-COPY pyproject.toml README.md LICENSE ./
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src ./src
-RUN python -m pip install --upgrade pip && pip install .
+RUN uv sync --locked --no-dev --no-editable --no-python-downloads
 
 # Run as a non-root user. Chromium keeps --no-sandbox because containers do not
 # grant the user namespaces its sandbox needs; the browser only reaches sites
