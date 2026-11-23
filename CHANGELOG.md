@@ -1,3 +1,17 @@
+## [2.0.0-dev.15](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.14...v2.0.0-dev.15) (2026-11-23)
+
+### Bug Fixes
+
+* **captcha:** retry mounted challenges on reserved tabs ([93af14d](https://github.com/IMXEren/prowl/commit/93af14d7f13666a4b744a9549e19817848bc039c))
+
+### New Features
+
+* **cdp:** expose authenticated browser and page sockets ([88ca02f](https://github.com/IMXEren/prowl/commit/88ca02fa8a3d9fc38d0816cf1fca742490607dfe))
+
+### Dependencies
+
+* **deps:** bump pydoll to 3.1.0-dev.1 ([c3e533e](https://github.com/IMXEren/prowl/commit/c3e533e125eae9e0a7a35fcb5659423dd8c8f82a))
+
 ## [2.0.0-dev.14](https://github.com/IMXEren/prowl/compare/v2.0.0-dev.13...v2.0.0-dev.14) (2026-11-12)
 
 ### Bug Fixes
