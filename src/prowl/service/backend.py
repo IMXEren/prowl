@@ -1111,6 +1111,14 @@ class BrowserBackend:
                 return []
         return await self.close_interactive(tab_id, allow_reserved=True)
 
+    async def reserved_cdp_target(self, tab_id: str) -> tuple[int, str] | None:
+        """Get the live reserved target and its browser's local debugging port."""
+        async with self._tabs_lock:
+            entry = self._tabs.get(tab_id)
+            if entry is None or not entry.reserved or not _interactive_group_live(entry.group):
+                return None
+            return entry.group._owner._lifecycle.cdp_port, entry.group.target_id  # noqa: SLF001 - owning browser's bound CDP port
+
     async def attach_reserved_tab(self, tab_id: str) -> int | None:
         """Attach one CDP client to the reservation's owning browser."""
         async with self._tabs_lock:

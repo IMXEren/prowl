@@ -914,9 +914,11 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
         self.assertEqual(await backend.close_interactive(tab), [])
         self.assertEqual(await backend.close_interactive(None), [])
         self.assertIsNone(await backend._steal_least_recent())
+        self.assertEqual(await backend.reserved_cdp_target(tab), (9222, target))
         self.assertEqual(await backend.attach_reserved_tab(tab), 9222)
         self.assertIsNone(await backend.attach_reserved_tab(tab))
         self.assertEqual(await backend.release_reserved_tab(tab), [tab])
+        self.assertIsNone(await backend.reserved_cdp_target(tab))
         self.assertEqual(await backend.release_reserved_tab(tab), [])
         self.assertEqual(groups[0].ppage.listeners["domcontentloaded"], [])
         self.assertEqual(groups[0].quit_calls, 1)
@@ -925,7 +927,8 @@ class InteractiveBackendTests(IsolatedAsyncioTestCase):
     async def test_reserved_named_egress_keeps_its_claim_until_closed(self) -> None:
         shutdown_log: list[str] = []
         backend, groups = self._backend(egress_idle_seconds=0.01, shutdown_log=shutdown_log)
-        tab, _target = await backend.reserve_tab("decodo")
+        tab, target = await backend.reserve_tab("decodo")
+        self.assertEqual(await backend.reserved_cdp_target(tab), (9223, target))
         self.assertEqual(await backend.attach_reserved_tab(tab), 9223)
         await asyncio.sleep(0.1)
         self.assertEqual(shutdown_log, [])
